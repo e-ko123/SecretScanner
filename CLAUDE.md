@@ -23,6 +23,7 @@ I'm still learning. When you explain things:
 - Before a big change, briefly say what you're about to do.
 - Leave room for me to write parts myself. If I ask, guide me instead of writing it all. Good candidates: the entropy check, some rules, some tests, README sections in my own words. Offer when we reach one.
 - Claude makes the commits; I review and push.
+- **Comment code heavily.** Whenever writing code (including tests), add plenty of comments explaining what each part does and why, in plain language, so I can read any file top to bottom and understand it. Explain regex patterns piece by piece, and explain any Python feature a beginner might not know the first time it appears in a file.
 
 ## Tech decisions
 
