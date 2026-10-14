@@ -265,6 +265,7 @@ Every command-line program finishes with an *exit code*: a number that tells wha
 |---|---|
 | `0` | No secrets found ✅ |
 | `1` | One or more secrets found 🚫 |
+| `2` | The command was used incorrectly (for example, a file that doesn't exist) ⚠️ |
 
 This is what makes automation possible: git cancels the commit when a pre-commit hook exits with `1`, and CI systems mark a build as failed the same way.
 

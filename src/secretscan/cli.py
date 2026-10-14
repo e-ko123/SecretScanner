@@ -24,6 +24,12 @@ import argparse
 # instead of being typed out in two files that could get out of sync.
 from importlib.metadata import version
 
+# `Path` represents a file or folder location (see scanner.py).
+from pathlib import Path
+
+# The function that does the actual scanning.
+from secretscan.scanner import scan_file
+
 
 def build_parser() -> argparse.ArgumentParser:
     """Describe the options the `secretscan` command accepts.
@@ -36,6 +42,16 @@ def build_parser() -> argparse.ArgumentParser:
         prog="secretscan",
         # The sentence shown at the top of `secretscan --help`.
         description="Find passwords, API keys, and private keys accidentally left in your code.",
+    )
+
+    # The file to scan. Because the name has no leading dashes, argparse
+    # treats it as a "positional" argument: the user just types it after
+    # the command, like `secretscan config.py`.
+    # (For now a file is required. Scanning folders, and defaulting to the
+    # current folder, comes in the next step.)
+    parser.add_argument(
+        "path",
+        help="the file to scan",
     )
 
     # Add a `--version` option. `action="version"` is a built-in argparse
@@ -54,10 +70,10 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     """Entry point for the `secretscan` command.
 
-    `argv` is the list of options the user typed, for example ["--version"].
+    `argv` is the list of options the user typed, for example ["config.py"].
     - When the real command runs, nothing is passed in, so argv is None and
       argparse reads the options from the actual terminal command instead.
-    - In tests, we pass a list directly, e.g. main(["--version"]). This lets
+    - In tests, we pass a list directly, e.g. main(["config.py"]). This lets
       us test the command without opening a real terminal.
 
     Returns the exit code: 0 = nothing found, 1 = secrets found.
@@ -67,7 +83,27 @@ def main(argv: list[str] | None = None) -> int:
 
     # Read and check the options. If the user typed something invalid,
     # argparse prints an error and exits on its own.
-    parser.parse_args(argv)
+    # `args.path` will hold the file name the user typed.
+    args = parser.parse_args(argv)
+    path = Path(args.path)
 
-    # Nothing to scan yet, so report "nothing found". Scanning comes next.
+    # Check the file exists before trying to open it. `parser.error` prints
+    # a short usage message plus our error text, then exits with code 2.
+    # Code 2 is the standard argparse code for "you used the command wrong",
+    # which keeps it separate from 1 ("secrets found").
+    if not path.is_file():
+        parser.error(f"file not found: {path}")
+
+    findings = scan_file(path)
+
+    # Print one line per finding, e.g.:  config.py:12  AWS Access Key ID
+    # We deliberately do NOT print `finding.secret`: the tool must never
+    # show a full secret on screen. A masked preview comes in a later step.
+    for finding in findings:
+        print(f"{finding.path}:{finding.line_number}  {finding.rule_name}")
+
+    # An empty list counts as False in Python, so this reads as:
+    # "if anything was found, exit with 1; otherwise exit with 0".
+    if findings:
+        return 1
     return 0
