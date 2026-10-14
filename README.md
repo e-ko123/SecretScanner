@@ -417,8 +417,8 @@ secretscan is a learning project, and it's honest to say what it *doesn't* do:
 Tests use [pytest](https://pytest.org/), which is only needed for development, not for using the tool.
 
 ```bash
-pip install -e . pytest   # -e = "editable": code changes take effect without reinstalling
-pytest
+pip install -e ".[dev]"   # -e = "editable": code changes take effect without reinstalling
+pytest                    # [dev] = also install the development tools (pytest)
 ```
 
 > **Note on fake secrets in tests:** GitHub automatically blocks pushes that contain real-looking secrets. To avoid this, tests never contain a complete fake key as plain text. They build it in code instead, for example `"AKIA" + "X" * 16`, so the full string never appears in any file.
