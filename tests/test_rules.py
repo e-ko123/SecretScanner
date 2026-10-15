@@ -10,6 +10,7 @@ from secretscan.rules import (
     GITHUB_FINE_GRAINED_TOKEN,
     GITHUB_TOKEN,
     SLACK_TOKEN,
+    STRIPE_LIVE_SECRET_KEY,
 )
 
 # A fake AWS key: "AKIA" plus 16 X's = 20 characters, the right shape.
@@ -136,3 +137,29 @@ def test_slack_rule_ignores_token_that_is_too_short():
     # Fewer than 10 characters after the dash.
     token = "xoxb-" + "1" * 9
     assert SLACK_TOKEN.pattern.search(token) is None
+
+
+# --- Stripe ----------------------------------------------------------------
+
+def test_stripe_rule_matches_a_live_key():
+    key = "sk_live_" + "a" * 24
+    match = STRIPE_LIVE_SECRET_KEY.pattern.search(f'stripe.api_key = "{key}"')
+    assert match is not None
+    assert match.group(0) == key
+
+
+def test_stripe_rule_matches_longer_newer_keys():
+    # Newer Stripe keys are longer than 24 characters; the whole key matches.
+    key = "sk_live_" + "a" * 99
+    assert STRIPE_LIVE_SECRET_KEY.pattern.search(key).group(0) == key
+
+
+def test_stripe_rule_ignores_test_keys():
+    # Test-mode keys can't move real money, so they aren't reported.
+    key = "sk_test_" + "a" * 24
+    assert STRIPE_LIVE_SECRET_KEY.pattern.search(key) is None
+
+
+def test_stripe_rule_ignores_key_that_is_too_short():
+    key = "sk_live_" + "a" * 23
+    assert STRIPE_LIVE_SECRET_KEY.pattern.search(key) is None

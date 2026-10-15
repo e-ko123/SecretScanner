@@ -129,6 +129,27 @@ SLACK_TOKEN = Rule(
 )
 
 
+# ---------------------------------------------------------------------------
+# Stripe live secret key
+# ---------------------------------------------------------------------------
+# Real example shape: sk_live_ followed by 24 or more letters and digits.
+#
+# We only look for LIVE keys ("sk_live_"), not test keys ("sk_test_").
+# Test keys only work in Stripe's practice mode and can't move real money,
+# so reporting them would mostly be noise.
+#
+# The pattern, piece by piece:
+#   \b             word boundary: nothing glued on the left.
+#   sk_live_       the exact text "sk_live_" ("sk" = secret key).
+#   [0-9a-zA-Z]    one digit or letter...
+#   {24,}          ...repeated 24 OR MORE times. Older keys have exactly 24;
+#                  newer ones are longer, so "at least 24" catches both.
+STRIPE_LIVE_SECRET_KEY = Rule(
+    name="Stripe Live Secret Key",
+    pattern=re.compile(r"\bsk_live_[0-9a-zA-Z]{24,}"),
+)
+
+
 # Every rule the scanner uses. The scanner loops over this list, so adding
 # a new rule here is all it takes for it to be checked.
 RULES = [
@@ -136,4 +157,5 @@ RULES = [
     GITHUB_TOKEN,
     GITHUB_FINE_GRAINED_TOKEN,
     SLACK_TOKEN,
+    STRIPE_LIVE_SECRET_KEY,
 ]
