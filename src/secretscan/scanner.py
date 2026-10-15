@@ -23,6 +23,24 @@ from pathlib import Path
 from secretscan.rules import RULES, Rule
 
 
+# Folders we never look inside. They hold tools, downloaded dependencies,
+# or generated files rather than code a person wrote, so scanning them would
+# be slow (node_modules can contain tens of thousands of files) and noisy
+# (other people's code can contain example keys).
+#
+# This is a `set` (curly braces) rather than a list. Sets are built for
+# fast "is this name in here?" checks, which is exactly how we use it.
+SKIP_FOLDERS = {
+    ".git",          # git's own internal database
+    "node_modules",  # JavaScript dependencies
+    ".venv",         # Python virtual environments
+    "venv",
+    "__pycache__",   # Python's cached, compiled files
+    "dist",          # build output
+    "build",
+}
+
+
 @dataclass(frozen=True)
 class Finding:
     """One possible secret found in a file."""
@@ -46,7 +64,8 @@ def find_files(path: Path) -> list[Path]:
 
     - If `path` is a single file, the answer is just that file.
     - If `path` is a folder, the answer is every file inside it, including
-      files inside its subfolders, subfolders of those, and so on.
+      files inside its subfolders, subfolders of those, and so on,
+      except for folders listed in SKIP_FOLDERS.
     """
     # A single file: nothing to search for, just return it in a list.
     if path.is_file():
@@ -60,12 +79,23 @@ def find_files(path: Path) -> list[Path]:
     #   subfolders  - the names of the folders directly inside it
     #   filenames   - the names of the files directly inside it
     for folder, subfolders, filenames in os.walk(path):
-        # Sort the subfolder names *in place* (that's what `.sort()` does,
-        # instead of making a new list). os.walk uses this same list to
-        # decide where to go next, so sorting it makes os.walk visit folders
-        # in alphabetical order. That keeps the output in the same order
-        # every time, which is nicer for users and makes tests reliable.
-        subfolders.sort()
+        # os.walk uses the `subfolders` list to decide where to go next.
+        # So if we change that list, we change where os.walk goes. We
+        # replace its contents with only the folders we want to visit,
+        # sorted alphabetically:
+        #
+        # - `[name for name in subfolders if name not in SKIP_FOLDERS]` is a
+        #   "list comprehension": a one-line way to build a new list by
+        #   filtering another one. It keeps every name NOT in SKIP_FOLDERS.
+        # - `sorted(...)` puts them in alphabetical order, so files are
+        #   always visited (and reported) in the same order every time.
+        # - `subfolders[:] = ...` replaces the contents of the *existing*
+        #   list. This detail matters: writing `subfolders = ...` would
+        #   only create a new list with the same name, and os.walk (which
+        #   still holds the old list) would never see our change.
+        subfolders[:] = sorted(
+            name for name in subfolders if name not in SKIP_FOLDERS
+        )
 
         # Sort the file names too, for the same reason.
         for filename in sorted(filenames):

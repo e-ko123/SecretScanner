@@ -4,7 +4,7 @@ Fake keys are built in code so no complete key appears in this file
 (see test_rules.py for why).
 """
 
-from secretscan.scanner import find_files, scan_file, scan_line
+from secretscan.scanner import SKIP_FOLDERS, find_files, scan_file, scan_line
 
 FAKE_AWS_KEY = "AKIA" + "X" * 16
 
@@ -44,6 +44,37 @@ def test_find_files_includes_files_in_subfolders(tmp_path):
 
 def test_find_files_returns_empty_list_for_empty_folder(tmp_path):
     assert find_files(tmp_path) == []
+
+
+def test_find_files_skips_folders_that_are_not_your_code(tmp_path):
+    # Put one file inside each folder that should be skipped...
+    for folder in SKIP_FOLDERS:
+        (tmp_path / folder).mkdir()
+        (tmp_path / folder / "file.py").write_text("x = 1\n")
+
+    # ...plus one normal file that should still be found.
+    (tmp_path / "app.py").write_text("x = 1\n")
+
+    assert find_files(tmp_path) == [tmp_path / "app.py"]
+
+
+def test_find_files_skips_folders_nested_deeper(tmp_path):
+    # Skipped folders are skipped wherever they appear, not just at the top,
+    # e.g. a node_modules folder inside a frontend/ folder.
+    (tmp_path / "frontend" / "node_modules").mkdir(parents=True)
+    (tmp_path / "frontend" / "node_modules" / "lib.js").write_text("x\n")
+    (tmp_path / "frontend" / "app.js").write_text("x\n")
+
+    assert find_files(tmp_path) == [tmp_path / "frontend" / "app.js"]
+
+
+def test_find_files_does_not_skip_folders_with_similar_names(tmp_path):
+    # Only exact folder names are skipped. "builder" contains the word
+    # "build", but it's a different folder and should still be scanned.
+    (tmp_path / "builder").mkdir()
+    (tmp_path / "builder" / "tool.py").write_text("x = 1\n")
+
+    assert find_files(tmp_path) == [tmp_path / "builder" / "tool.py"]
 
 
 # --- scan_line -------------------------------------------------------------
