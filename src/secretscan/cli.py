@@ -28,7 +28,7 @@ import sys
 # `version()` looks up the version number of an installed package.
 # We use it so the version only lives in one place (pyproject.toml),
 # instead of being typed out in two files that could get out of sync.
-from importlib.metadata import version
+from importlib.metadata import PackageNotFoundError, version
 
 # `Path` represents a file or folder location (see scanner.py).
 from pathlib import Path
@@ -364,6 +364,19 @@ class SafeArgumentParser(argparse.ArgumentParser):
         self.exit(2, f"{self.prog}: error: {display(message)}\n")
 
 
+def installed_version() -> str:
+    """The installed version number, or "unknown" when running from a plain copy.
+
+    The version is looked up in the package's install records. If the code
+    is run without being installed, those records don't exist; that
+    shouldn't break every command just because `--version` can't answer.
+    """
+    try:
+        return version("secretscan")
+    except PackageNotFoundError:
+        return "unknown"
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Describe the options the `secretscan` command accepts.
 
@@ -446,7 +459,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--version",
         action="version",
-        version=f"%(prog)s {version('secretscan')}",
+        version=f"%(prog)s {installed_version()}",
     )
 
     # Note: we don't add `--help` ourselves. argparse adds it automatically.
@@ -635,7 +648,9 @@ def run(argv: list[str] | None = None) -> int:
     if args.review and reportable:
         # Check the destination before collecting answers. Atomic saves need
         # a writable parent directory even when the file already exists.
-        destination = ignore_path or root / IGNORE_FILE_NAME
+        # `realpath` follows a symlinked ignore file to where saving will
+        # really write (see save_ignore_file), so the right folder is checked.
+        destination = Path(os.path.realpath(ignore_path or root / IGNORE_FILE_NAME))
         try:
             with tempfile.TemporaryFile(dir=destination.parent):
                 pass

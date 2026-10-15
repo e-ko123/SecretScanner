@@ -188,6 +188,10 @@ def load_ignore_file(path: Path) -> dict[str, str]:
         raise IgnoreFileError(
             f"not valid JSON (problem at line {error.lineno}, column {error.colno})"
         )
+    except RecursionError:
+        # Python's JSON reader handles nesting like [[[[...]]]] by calling
+        # itself once per level, and gives up after about 1,000 levels.
+        raise IgnoreFileError("is nested too deeply to be an ignore file")
 
     # The top level must be a JSON object ({...}), which Python reads as a
     # dictionary, with exactly the fields "version" and "findings".

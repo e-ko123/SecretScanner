@@ -721,3 +721,41 @@ def test_private_key_header_split_over_two_strings_is_not_reported(tmp_path):
     path = tmp_path / "doc.py"
     path.write_text('h = ("-----BEGIN RSA PRIV"\n     "ATE KEY-----")\n')
     assert scanner.scan_file(path) == []
+
+
+# --- audit round 2 ---------------------------------------------------------------
+
+def test_deeply_nested_ignore_file_gives_a_clear_error(tmp_path, capsys):
+    (tmp_path / ".secretscanignore").write_text("[" * 100_000 + "]" * 100_000)
+    assert cli.main([str(tmp_path)]) == 2
+    assert "nested too deeply" in capsys.readouterr().err
+
+
+def test_missing_package_metadata_does_not_break_scanning(tmp_path, monkeypatch, capsys):
+    def missing(name):
+        raise cli.PackageNotFoundError(name)
+
+    monkeypatch.setattr(cli, "version", missing)
+    assert cli.main([str(tmp_path)]) == 0
+
+
+@pytest.mark.skipif(os.name == "nt", reason="symlinks need extra permissions on Windows")
+def test_review_checks_the_real_folder_of_a_symlinked_ignore_file(tmp_path, monkeypatch, capsys):
+    shared = tmp_path / "shared" / "ignore.json"
+    shared.parent.mkdir()
+    save_ignore_file(shared, {})
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / ".secretscanignore").symlink_to(shared)
+    (project / "a.txt").write_text(AWS)
+    checked = []
+    real_temporary_file = cli.tempfile.TemporaryFile
+
+    def recording_temporary_file(*args, dir=None, **kwargs):
+        checked.append(Path(dir))
+        return real_temporary_file(*args, dir=dir, **kwargs)
+
+    monkeypatch.setattr(cli.tempfile, "TemporaryFile", recording_temporary_file)
+    answer(monkeypatch, "")
+    cli.main([str(project), "--review"])
+    assert checked == [shared.parent.resolve()]
