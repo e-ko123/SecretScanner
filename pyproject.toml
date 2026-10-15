@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "secretscan"
 version = "0.1.0"
-description = "Find passwords, API keys, and private keys accidentally left in your code."
+description = "Find API keys and private keys accidentally left in your code."
 readme = "README.md"
 requires-python = ">=3.9"
 license = { text = "MIT" }

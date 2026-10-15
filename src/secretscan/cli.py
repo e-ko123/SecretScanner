@@ -372,7 +372,7 @@ def build_parser() -> argparse.ArgumentParser:
         # The program name shown in help and error messages.
         prog="secretscan",
         # The sentence shown at the top of `secretscan --help`.
-        description="Find passwords, API keys, and private keys accidentally left in your code.",
+        description="Find API keys and private keys accidentally left in your code.",
     )
 
     # The file or folder to scan. Because the name has no leading dashes,
