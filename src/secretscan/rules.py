@@ -222,6 +222,39 @@ OPENAI_API_KEY = Rule(
 )
 
 
+# ---------------------------------------------------------------------------
+# Private key block
+# ---------------------------------------------------------------------------
+# Private keys (used for SSH logins, HTTPS certificates, signing, etc.) are
+# stored as a block of text that starts with a header line: five dashes,
+# the word BEGIN, the kind of key, the words PRIVATE KEY, and five more
+# dashes. The kind of key varies: RSA, EC, DSA, OPENSSH, ENCRYPTED, PGP,
+# or nothing at all.
+#
+# Finding just the header line is enough: if it's in a file, the secret key
+# itself is on the lines right below it.
+#
+# (This comment describes the header in words on purpose. Writing out a
+# real-looking header here would make secretscan flag its own source code!)
+#
+# The pattern, piece by piece:
+#   -----        five literal dashes.
+#   BEGIN        the exact word "BEGIN".
+#   [A-Z ]*      any number of capital letters and spaces, INCLUDING NONE
+#                (that's what * means: "zero or more"). This covers the
+#                kind of key, like " RSA " or " OPENSSH ", or just " ".
+#   PRIVATE KEY  the exact words "PRIVATE KEY".
+#
+# No \b at the start: the pattern begins with a dash, and \b only works
+# next to letters and digits (see the Google rule for why).
+# Public keys and certificates ("BEGIN PUBLIC KEY", "BEGIN CERTIFICATE") are
+# meant to be shared, so they don't match: they don't contain "PRIVATE KEY".
+PRIVATE_KEY = Rule(
+    name="Private Key",
+    pattern=re.compile(r"-----BEGIN[A-Z ]*PRIVATE KEY"),
+)
+
+
 # Every rule the scanner uses. The scanner loops over this list, so adding
 # a new rule here is all it takes for it to be checked.
 RULES = [
@@ -233,4 +266,5 @@ RULES = [
     GOOGLE_API_KEY,
     ANTHROPIC_API_KEY,
     OPENAI_API_KEY,
+    PRIVATE_KEY,
 ]

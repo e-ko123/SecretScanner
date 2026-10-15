@@ -12,6 +12,7 @@ from secretscan.rules import (
     GITHUB_TOKEN,
     GOOGLE_API_KEY,
     OPENAI_API_KEY,
+    PRIVATE_KEY,
     SLACK_TOKEN,
     STRIPE_LIVE_SECRET_KEY,
 )
@@ -236,3 +237,34 @@ def test_openai_rule_does_not_match_anthropic_keys():
     # The negative lookahead (?!ant-) stops the OpenAI rule from also
     # reporting Anthropic keys, which would show every one twice.
     assert OPENAI_API_KEY.pattern.search(FAKE_ANTHROPIC_KEY) is None
+
+
+# --- Private keys ----------------------------------------------------------
+# The header is built from two pieces so the full header line never appears
+# in this file as plain text.
+
+def make_header(kind):
+    # e.g. make_header("RSA ") -> five dashes + "BEGIN RSA PRIVATE KEY" + five dashes
+    return "-----BEGIN " + kind + "PRIVATE KEY" + "-----"
+
+
+def test_private_key_rule_matches_common_key_kinds():
+    # "" (nothing) covers the plain kind with no word before PRIVATE KEY.
+    for kind in ["RSA ", "EC ", "DSA ", "OPENSSH ", "ENCRYPTED ", ""]:
+        assert PRIVATE_KEY.pattern.search(make_header(kind)) is not None
+
+
+def test_private_key_rule_matches_pgp_key_block():
+    header = "-----BEGIN PGP " + "PRIVATE KEY BLOCK-----"
+    assert PRIVATE_KEY.pattern.search(header) is not None
+
+
+def test_private_key_rule_ignores_public_keys_and_certificates():
+    # These are meant to be shared, so they aren't secrets.
+    assert PRIVATE_KEY.pattern.search("-----BEGIN PUBLIC KEY-----") is None
+    assert PRIVATE_KEY.pattern.search("-----BEGIN CERTIFICATE-----") is None
+
+
+def test_private_key_rule_ignores_lowercase_mentions():
+    # Talking ABOUT private keys in normal text isn't a leak.
+    assert PRIVATE_KEY.pattern.search("never commit your private key") is None
