@@ -59,8 +59,54 @@ AWS_ACCESS_KEY_ID = Rule(
 )
 
 
+# ---------------------------------------------------------------------------
+# GitHub token
+# ---------------------------------------------------------------------------
+# Real example shape: ghp_ followed by 36 letters or digits (40 total).
+# The first three letters tell you what kind of token it is:
+#   ghp = personal access token (the most common)
+#   gho = OAuth token
+#   ghu = user-to-server token
+#   ghs = server-to-server token
+#   ghr = refresh token
+#
+# The pattern, piece by piece:
+#   \b                     word boundary: nothing glued on the left.
+#   (ghp|gho|ghu|ghs|ghr)  ONE of these five prefixes. The | means "or",
+#                          and the brackets group the choices together.
+#   _                      a literal underscore.
+#   [0-9a-zA-Z]            one digit, lowercase letter, or capital letter...
+#   {36}                   ...repeated exactly 36 times.
+#   \b                     word boundary: the token must end here.
+GITHUB_TOKEN = Rule(
+    name="GitHub Token",
+    pattern=re.compile(r"\b(ghp|gho|ghu|ghs|ghr)_[0-9a-zA-Z]{36}\b"),
+)
+
+
+# ---------------------------------------------------------------------------
+# GitHub fine-grained personal access token
+# ---------------------------------------------------------------------------
+# GitHub's newer kind of token, which can be limited to specific repos.
+# Real example shape: github_pat_ followed by 82 more characters, which are
+# letters, digits, and underscores (it has an underscore in the middle).
+#
+# The pattern, piece by piece:
+#   \b              word boundary: nothing glued on the left.
+#   github_pat_     the exact text "github_pat_".
+#   [0-9a-zA-Z_]    one letter, digit, or underscore...
+#   {82}            ...repeated exactly 82 times.
+#   \b              word boundary: the token must end here.
+GITHUB_FINE_GRAINED_TOKEN = Rule(
+    name="GitHub Fine-Grained Token",
+    pattern=re.compile(r"\bgithub_pat_[0-9a-zA-Z_]{82}\b"),
+)
+
+
 # Every rule the scanner uses. The scanner loops over this list, so adding
 # a new rule here is all it takes for it to be checked.
 RULES = [
     AWS_ACCESS_KEY_ID,
+    GITHUB_TOKEN,
+    GITHUB_FINE_GRAINED_TOKEN,
 ]
