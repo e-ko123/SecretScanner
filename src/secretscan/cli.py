@@ -231,9 +231,6 @@ def review_findings(findings: list[Finding], ids: list[str]) -> dict[str, str] |
         # The same key in the same file shares one ID (see ignores.py), so
         # if the user already said yes to an earlier copy, this one is
         # covered too. Don't ask twice.
-        if finding.rule_id == "private-key":
-            print("Private-key headers cannot be dismissed safely; keeping finding.")
-            continue
         if this_id in dismissed:
             continue
 
@@ -496,7 +493,7 @@ def run(argv: list[str] | None = None) -> int:
     ignored_count = 0
     for finding in findings:
         this_id = finding_id(finding, root)
-        if this_id in ignored_ids and finding.rule_id != "private-key":
+        if this_id in ignored_ids:
             ignored_count += 1
         else:
             reportable.append(finding)

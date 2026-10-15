@@ -117,20 +117,56 @@ def test_non_utf8_filename_fingerprint():
     assert first != ignores.fingerprint("aws", "bad\udcfe", AWS)
 
 
-def test_private_header_cannot_hide_later_key(tmp_path, capsys, monkeypatch):
+# A fake private key: the header (built in two pieces so this file never
+# contains a whole header), lines of base64-looking data, and the end line.
+PEM_HEADER = "-----BEGIN " + "RSA PRIVATE KEY-----"
+PEM_FOOTER = "-----END " + "RSA PRIVATE KEY-----"
+
+
+def pem_key(seed):
+    """A synthetic key block; different seeds give different key data."""
+    data = "\n".join(("MIIE" + seed * 15)[:64] for _ in range(3))
+    return PEM_HEADER + "\n" + data + "\n" + PEM_FOOTER + "\n"
+
+
+def test_private_key_header_in_prose_is_not_a_finding(tmp_path):
+    path = tmp_path / "README.md"
+    path.write_text("A key file starts with " + PEM_HEADER + " and then data.\n"
+                    "PuTTY files start with " + "PuTTY-User-Key-File-" + "3: instead.\n")
+    assert scanner.scan_file(path) == []
+
+
+def test_private_key_block_is_found_multiline_and_in_json(tmp_path):
     path = tmp_path / "keys.txt"
-    header = "-----BEGIN " + "RSA PRIVATE KEY-----"
-    path.write_text(header + "\nfixture\n")
-    old_id = finding_id(scanner.scan_file(path)[0], tmp_path)
-    save_ignore_file(tmp_path / ".secretscanignore", {old_id: "fixture"})
-    path.write_text(header + "\nfixture\n" + header + " # secretscan:ignore\nnew key\n")
+    path.write_text(pem_key("Ab12"))
+    # The same key stored inside a JSON string, with \n written out.
+    json_path = tmp_path / "service.json"
+    json_path.write_text('{"private_key": "' + pem_key("Ab12").replace("\n", "\\n") + '"}\n')
+    findings = scanner.scan_file(path) + scanner.scan_file(json_path)
+    assert [f.rule_id for f in findings] == ["private-key", "private-key"]
+    # Both describe the same key data, so their secrets match.
+    assert findings[0].secret == findings[1].secret
+
+
+def test_dismissing_one_private_key_does_not_hide_another(tmp_path, capsys):
+    path = tmp_path / "keys.txt"
+    path.write_text(pem_key("Ab12"))
+    old_id = finding_id(scanner.scan_file(path)[0], cli.scan_root(tmp_path))
+    save_ignore_file(tmp_path / ".secretscanignore", {old_id: "test fixture"})
+    assert cli.main([str(tmp_path)]) == 0
+    # A second, different key in the same file must still be reported.
+    path.write_text(pem_key("Ab12") + pem_key("Zz98"))
     assert cli.main([str(tmp_path)]) == 1
-    assert "Found 2 possible secrets" in capsys.readouterr().out
+    assert "Found 1 possible secret" in capsys.readouterr().out
+
+
+def test_private_key_block_can_be_dismissed_in_review(tmp_path, monkeypatch, capsys):
+    (tmp_path / "keys.txt").write_text(pem_key("Ab12"))
     monkeypatch.setattr(cli, "is_interactive", lambda: True)
-    def no_questions(*args):
-        pytest.fail("Header-only findings must not offer dismissal")
-    monkeypatch.setattr("builtins.input", no_questions)
-    assert cli.main([str(tmp_path), "--review"]) == 1
+    answers = iter(["y", "test fixture"])
+    monkeypatch.setattr("builtins.input", lambda prompt: next(answers))
+    assert cli.main([str(tmp_path), "--review"]) == 0
+    assert cli.main([str(tmp_path)]) == 0
 
 
 def test_single_file_review_uses_project_root(tmp_path, monkeypatch, capsys):
@@ -350,3 +386,115 @@ def test_slack_rotation_doc_placeholder_is_recognized(tmp_path, capsys):
     path.write_text("REFRESH=" + "xoxe-1-" + "Your-Refresh-Token" + "\n")
     assert cli.main([str(path)]) == 0
     assert "Suppressed 1 recognized placeholder" in capsys.readouterr().out
+
+
+# --- second audit: scanning ----------------------------------------------------
+
+import os
+import time
+
+
+def test_many_spaces_do_not_make_scanning_slow(tmp_path):
+    # An earlier split-string regex slowed down quadratically on this input:
+    # a quote, a long run of spaces, and a character that stops the match.
+    path = tmp_path / "a.py"
+    path.write_text('"a"' + " " * 200_000 + "!\n'b'\n")
+    started = time.perf_counter()
+    scanner.scan_file(path)
+    # Generous limit: the fixed regex takes well under a tenth of a second.
+    assert time.perf_counter() - started < 2
+
+
+def test_marker_inside_url_is_not_a_comment(tmp_path):
+    # Here "#" is part of the URL (data), not a comment, so nothing is hidden.
+    path = tmp_path / "a.py"
+    path.write_text('DOC = """https://example.com/?k=' + AWS + '#secretscan:ignore"""\n')
+    assert [f.secret for f in scanner.scan_file(path)] == [AWS]
+
+
+def test_independent_statements_are_not_joined(tmp_path):
+    # Two separate Python statements (no brackets, no + or \): Python never
+    # joins them, so neither should the scanner.
+    path = tmp_path / "a.py"
+    path.write_text('first = "' + AWS[:10] + '"\n"' + AWS[10:] + '"\n')
+    assert scanner.scan_file(path) == []
+
+
+@pytest.mark.parametrize("source", [
+    # Python: mixed quote styles inside brackets.
+    'key = ("' + AWS[:10] + "\"\n       '" + AWS[10:] + "')\n",
+    # Python: a comment between the two fragments, inside brackets.
+    'key = ("' + AWS[:10] + '"  # first half\n       "' + AWS[10:] + '")\n',
+    # JavaScript: + at the start of the second line.
+    'const key = "' + AWS[:10] + '"\n    + "' + AWS[10:] + '";\n',
+])
+def test_common_two_fragment_forms_are_joined(tmp_path, source):
+    path = tmp_path / "a.src"
+    path.write_text(source)
+    assert [f.secret for f in scanner.scan_file(path)] == [AWS]
+
+
+def test_split_key_is_not_also_reported_as_its_first_half(tmp_path):
+    # The first fragment alone is long enough to match the OpenAI rule;
+    # only the complete key should be reported.
+    key = "sk-proj-" + "Ab12Cd34" * 10
+    path = tmp_path / "a.py"
+    path.write_text('key = ("' + key[:48] + '"\n       "' + key[48:] + '")\n')
+    assert [f.secret for f in scanner.scan_file(path)] == [key]
+
+
+def test_findings_are_in_line_order(tmp_path):
+    path = tmp_path / "a.py"
+    path.write_text('key = ("' + AWS[:10] + '"\n       "' + AWS[10:] + '")\nother = "' + GHP + '"\n')
+    assert [f.line_number for f in scanner.scan_file(path)] == [1, 3]
+
+
+def test_json_unicode_escape_cannot_hide_a_key(tmp_path):
+    # "A" is JSON for "A", so this decodes to the full AWS key.
+    path = tmp_path / "config.json"
+    path.write_text('{"key": "\\u0041' + AWS[1:] + '"}\n')
+    assert [f.secret for f in scanner.scan_file(path)] == [AWS]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="symlinks need extra permissions on Windows")
+def test_file_symlink_outside_the_project_is_skipped(tmp_path):
+    outside = tmp_path / "outside.txt"
+    outside.write_text(AWS)
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "link.txt").symlink_to(outside)
+    issues = []
+    assert scanner.find_files(project, issues) == []
+    assert issues[0].reason == "symlink file"
+
+
+def test_file_that_grows_after_listing_is_not_read_in_full(tmp_path, capsys, monkeypatch):
+    path = tmp_path / "a.txt"
+    path.write_text("small\n")
+    real_find = cli.find_files
+
+    def find_then_grow(target, issues):
+        files = real_find(target, issues)
+        # Simulate another program replacing the file after it was listed.
+        path.write_bytes(b"a" * (scanner.MAX_FILE_SIZE + 10))
+        return files
+
+    monkeypatch.setattr(cli, "find_files", find_then_grow)
+    assert cli.main([str(tmp_path)]) == 2
+    assert "could not read file" in capsys.readouterr().err
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="named pipes are Unix-only")
+def test_file_swapped_for_a_pipe_does_not_hang(tmp_path, capsys, monkeypatch):
+    path = tmp_path / "a.txt"
+    path.write_text("small\n")
+    real_find = cli.find_files
+
+    def find_then_swap(target, issues):
+        files = real_find(target, issues)
+        path.unlink()
+        os.mkfifo(path)  # a pipe nobody writes to: reading it would wait forever
+        return files
+
+    monkeypatch.setattr(cli, "find_files", find_then_swap)
+    assert cli.main([str(tmp_path)]) == 2
