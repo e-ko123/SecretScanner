@@ -759,3 +759,24 @@ def test_review_checks_the_real_folder_of_a_symlinked_ignore_file(tmp_path, monk
     answer(monkeypatch, "")
     cli.main([str(project), "--review"])
     assert checked == [shared.parent.resolve()]
+
+
+# --- audit round 3 ---------------------------------------------------------------
+
+def test_pgp_key_id_covers_the_whole_block(tmp_path):
+    # A PGP block ends with "...PRIVATE KEY BLOCK-----". The whole block,
+    # including data past the first few lines, must be part of the ID.
+    header = "-----BEGIN PGP " + "PRIVATE KEY BLOCK-----"
+    footer = "-----END PGP " + "PRIVATE KEY BLOCK-----"
+    lines = [("lQOY" + "Ab12" * 16)[:64]] * 8
+
+    def key(last_line):
+        return "\n".join([header, "", *lines, last_line, footer]) + "\n"
+
+    first = tmp_path / "a.asc"
+    second = tmp_path / "b.asc"
+    first.write_text(key("=Ab12"))
+    second.write_text(key("=Zz98"))  # differs only on the last line
+    secret_a = scanner.scan_file(first)[0].secret
+    assert secret_a.endswith("BLOCK-----")
+    assert secret_a != scanner.scan_file(second)[0].secret

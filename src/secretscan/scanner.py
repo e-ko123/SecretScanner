@@ -340,8 +340,9 @@ def decode_json_escapes(line: str) -> str:
 # file looks like) isn't a leak. A real key has encoded key data right below
 # the header: lines of 64 or more "base64" characters (letters, digits, + and /).
 KEY_DATA = re.compile(r"[A-Za-z0-9+/]{60,}")
-# Where a key block ends: the PEM end line, or PuTTY's last line.
-KEY_END = re.compile(r"-----END[A-Z ]*PRIVATE KEY-----|Private-MAC: *[0-9a-f]+")
+# Where a key block ends: the PEM end line (PGP keys add " BLOCK" to it,
+# hence the optional `(?: BLOCK)?`), or PuTTY's last line.
+KEY_END = re.compile(r"-----END[A-Z ]*PRIVATE KEY(?: BLOCK)?-----|Private-MAC: *[0-9a-f]+")
 # How many lines after the header we look at for the start of the key data.
 # PuTTY files have up to 3 short "Name: value" lines before their data.
 KEY_DATA_LINES = 5
