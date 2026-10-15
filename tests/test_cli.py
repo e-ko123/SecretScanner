@@ -59,7 +59,34 @@ def test_clean_file_exits_0_and_prints_nothing(tmp_path, capsys):
     assert capsys.readouterr().out == ""
 
 
-def test_missing_file_exits_2(tmp_path, capsys):
+def test_folder_with_secret_reports_file_inside_it(tmp_path, capsys):
+    # A secret in a subfolder should be found when scanning the top folder.
+    (tmp_path / "src").mkdir()
+    secret_file = tmp_path / "src" / "settings.py"
+    secret_file.write_text(f"AWS_KEY = '{FAKE_AWS_KEY}'\n")
+    (tmp_path / "clean.py").write_text("print('hello')\n")
+
+    assert main([str(tmp_path)]) == 1
+
+    output = capsys.readouterr().out
+    assert f"{secret_file}:1" in output
+    # Only the file with the secret should be reported.
+    assert "clean.py" not in output
+
+
+def test_no_path_scans_current_folder(tmp_path, monkeypatch, capsys):
+    # `monkeypatch` is a pytest helper for temporarily changing things
+    # during a test. Here, `chdir` makes tmp_path the "current folder",
+    # just like running `cd` in the terminal. It's undone after the test.
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "config.py").write_text(f"AWS_KEY = '{FAKE_AWS_KEY}'\n")
+
+    # An empty list is like typing just `secretscan` with nothing after it.
+    assert main([]) == 1
+    assert "config.py:1" in capsys.readouterr().out
+
+
+def test_missing_path_exits_2(tmp_path, capsys):
     missing = tmp_path / "does_not_exist.py"
 
     # parser.error() exits with code 2 ("you used the command wrong").
@@ -68,4 +95,4 @@ def test_missing_file_exits_2(tmp_path, capsys):
 
     assert exit_info.value.code == 2
     # Error messages go to "stderr" (the error output), not normal output.
-    assert "file not found" in capsys.readouterr().err
+    assert "path not found" in capsys.readouterr().err
