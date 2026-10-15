@@ -282,13 +282,14 @@ This is what makes automation possible: git cancels the commit when a pre-commit
 | Secret type | What it looks like (masked) | Notes |
 |---|---|---|
 | **AWS Access Key ID** | `AKIA****************` | Starts with `AKIA`, followed by 16 capital letters and digits |
-| **GitHub token** | `ghp_************************************` | Prefixes `ghp_`, `gho_`, `ghu_`, `ghs_`, `ghr_`, and `github_pat_` |
-| **Slack token** | `xoxb-***********` | Prefixes such as `xoxb-`, `xoxp-`, `xoxa-` |
-| **Stripe live secret key** | `sk_l*****************` | Only **live** keys (`sk_live_`). Test keys can't move real money |
+| **GitHub token** | `ghp_************************************` | Prefixes `ghp_`, `gho_`, `ghu_`, `ghs_`, `ghr_`, followed by 36 letters and digits |
+| **GitHub fine-grained token** | `gith*************************…` | Starts with `github_pat_`, GitHub's newer kind of token |
+| **Slack token** | `xoxb**************************` | Prefixes `xoxb-`, `xoxp-`, `xoxa-`, `xoxr-`, `xoxs-` |
+| **Stripe live secret key** | `sk_l************************` | Only **live** keys (`sk_live_`). Test keys can't move real money |
 | **Google API key** | `AIza***********************************` | Starts with `AIza`, 39 characters total |
-| **OpenAI API key** | `sk-p****************` | Starts with `sk-` (including `sk-proj-`) |
-| **Anthropic API key** | `sk-a****************` | Starts with `sk-ant-` |
-| **Private key** | `----************************` | Any `-----BEGIN ... PRIVATE KEY-----` block (RSA, EC, OpenSSH, etc.) |
+| **OpenAI API key** | `sk-p****************************…` | Starts with `sk-` (including `sk-proj-`), but not `sk-ant-` |
+| **Anthropic API key** | `sk-a****************************…` | Starts with `sk-ant-` |
+| **Private key** | `----**********************` | Any `-----BEGIN ... PRIVATE KEY-----` header (RSA, EC, DSA, OpenSSH, encrypted, PGP) |
 | **Generic password / secret** | `password = "****"` | Assignments like `password = "..."`, `api_key: "..."`, `secret = '...'`, but **only if the value looks random** (see below) |
 
 ### What it skips
