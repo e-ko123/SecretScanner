@@ -9,6 +9,7 @@ from secretscan.rules import (
     AWS_ACCESS_KEY_ID,
     GITHUB_FINE_GRAINED_TOKEN,
     GITHUB_TOKEN,
+    SLACK_TOKEN,
 )
 
 # A fake AWS key: "AKIA" plus 16 X's = 20 characters, the right shape.
@@ -105,3 +106,33 @@ def test_github_fine_grained_rule_matches_a_token():
 def test_github_fine_grained_rule_ignores_token_that_is_too_short():
     token = "github_pat_" + "a" * 50
     assert GITHUB_FINE_GRAINED_TOKEN.pattern.search(token) is None
+
+
+# --- Slack -----------------------------------------------------------------
+
+# A fake Slack bot token, in the real shape: xoxb-<numbers>-<numbers>-<letters>.
+FAKE_SLACK_TOKEN = "xoxb-" + "1" * 12 + "-" + "2" * 12 + "-" + "a" * 24
+
+
+def test_slack_rule_matches_a_token():
+    match = SLACK_TOKEN.pattern.search(f'SLACK = "{FAKE_SLACK_TOKEN}"')
+    assert match is not None
+    assert match.group(0) == FAKE_SLACK_TOKEN
+
+
+def test_slack_rule_matches_every_token_kind():
+    for kind in ["a", "b", "p", "r", "s"]:
+        token = "xox" + kind + "-" + "1" * 20
+        assert SLACK_TOKEN.pattern.search(token) is not None
+
+
+def test_slack_rule_ignores_unknown_kind():
+    # "xoxz" isn't a real Slack token kind.
+    token = "xoxz-" + "1" * 20
+    assert SLACK_TOKEN.pattern.search(token) is None
+
+
+def test_slack_rule_ignores_token_that_is_too_short():
+    # Fewer than 10 characters after the dash.
+    token = "xoxb-" + "1" * 9
+    assert SLACK_TOKEN.pattern.search(token) is None

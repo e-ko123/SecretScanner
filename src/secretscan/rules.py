@@ -103,10 +103,37 @@ GITHUB_FINE_GRAINED_TOKEN = Rule(
 )
 
 
+# ---------------------------------------------------------------------------
+# Slack token
+# ---------------------------------------------------------------------------
+# Real example shape: xoxb-<numbers>-<numbers>-<letters and digits>
+# (the length varies).
+# The letter after "xox" tells you what kind of token it is:
+#   b = bot token, p = user token, a / r / s = other kinds of Slack tokens.
+#
+# The pattern, piece by piece:
+#   \b             word boundary: nothing glued on the left.
+#   xox            the exact letters "xox". Every Slack token starts this way.
+#   [abprs]        ONE of the letters a, b, p, r, or s. A list of letters in
+#                  square brackets means "any one of these".
+#   -              a literal dash.
+#   [0-9A-Za-z-]   one digit, letter, or dash. (A dash at the END of the
+#                  square brackets means a real "-" character, not a range
+#                  like the one in "0-9".)
+#   {10,}          ...repeated 10 OR MORE times. Slack tokens don't have one
+#                  fixed length, so we say "at least 10" instead of an exact
+#                  number. Nothing after the comma means "no upper limit".
+SLACK_TOKEN = Rule(
+    name="Slack Token",
+    pattern=re.compile(r"\bxox[abprs]-[0-9A-Za-z-]{10,}"),
+)
+
+
 # Every rule the scanner uses. The scanner loops over this list, so adding
 # a new rule here is all it takes for it to be checked.
 RULES = [
     AWS_ACCESS_KEY_ID,
     GITHUB_TOKEN,
     GITHUB_FINE_GRAINED_TOKEN,
+    SLACK_TOKEN,
 ]
