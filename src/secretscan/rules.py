@@ -190,6 +190,10 @@ GITHUB_FINE_GRAINED_TOKEN = Rule(
 #   (?:xox[abeprs]|xwfp)  "xox" plus ONE of the letters a, b, e, p, r, s
 #                  (a list of letters in square brackets means "any one of
 #                  these"), OR "xwfp".
+#   ...then a dash and 10 or more letters, digits, or dashes (below).
+#   |xapp-...      OR an app-level token: "xapp-", a number, "-", letters and
+#                  digits, "-", a number, "-", letters and digits.
+#                  [0-9]+ means "one or more digits".
 #   -              a literal dash.
 #   [0-9A-Za-z-]   one digit, letter, or dash. (A dash at the END of the
 #                  square brackets means a real "-" character, not a range

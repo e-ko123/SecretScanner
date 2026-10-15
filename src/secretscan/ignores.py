@@ -133,6 +133,9 @@ def fingerprint(rule_id: str, path: str, candidate: str) -> str:
     )
 
     # SHA-256 works on bytes, not text, so encode the string as UTF-8 first.
+    # `errors="surrogatepass"` handles file names that aren't valid text
+    # (Linux allows those; Python stores the odd bytes as "surrogate"
+    # characters). Normal UTF-8 encoding would crash on them.
     # `hexdigest()` gives the hash as 64 hexadecimal characters.
     return hashlib.sha256(canonical.encode("utf-8", errors="surrogatepass")).hexdigest()
 
@@ -174,7 +177,12 @@ def load_ignore_file(path: Path) -> dict[str, str]:
     # Parse the JSON. If it's broken, say where, but not what's there.
     # `json.JSONDecodeError` knows the line and column of the problem.
     try:
-        # JSON normally keeps the last duplicate field, hiding mistakes.
+        # If a JSON object lists the same field twice, like
+        # {"version": 2, "version": 1}, Python normally keeps the last one
+        # without a word. That could hide a mistake, so this small function
+        # rejects duplicates instead. `object_pairs_hook` tells json.loads
+        # to hand every JSON object to this function as a list of
+        # (field, value) pairs and use whatever it returns.
         def unique_object(pairs):
             result = {}
             for key, value in pairs:

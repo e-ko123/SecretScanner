@@ -84,8 +84,19 @@ def display(value: object) -> str:
 
 
 def scan_root(path: Path) -> Path:
-    """Use one project root for single-file and directory reviews."""
+    """Find the project's top folder ("root") for the file or folder being scanned.
+
+    Finding IDs are built from each file's path relative to this root, and
+    the ignore file is looked for here. Using the same root whether you scan
+    one file, a subfolder, or the whole project means the IDs match, so a
+    dismissal made in one kind of scan still works in the others.
+    """
+    # The folder to start from: the path itself, or a file's folder.
+    # `resolve()` turns it into a full, absolute path, following shortcuts.
     directory = (path if path.is_dir() else path.parent).resolve()
+    # The start folder, then its parent, grandparent... up to the top of the
+    # disk. `*directory.parents` unpacks that list of parents into the tuple
+    # (a tuple is like a list that can't be changed).
     ancestors = (directory, *directory.parents)
     # A git repository's top folder wins: it's the clearest "project root",
     # even if a subfolder happens to have its own ignore file.
@@ -96,10 +107,15 @@ def scan_root(path: Path) -> Path:
     for parent in ancestors:
         if (parent / IGNORE_FILE_NAME).exists():
             return parent
-    # Outside a repository, commands run inside the project share the cwd.
+    # No git and no ignore file anywhere above. Fall back to the "current
+    # working directory" (cwd: the folder the terminal is in) if the scanned
+    # path is inside it. That way, commands typed from the project's top
+    # folder all agree on the root.
     cwd = Path.cwd().resolve()
     if directory == cwd or cwd in directory.parents:
         return cwd
+    # Otherwise (scanning something outside the terminal's folder), use the
+    # scanned folder itself.
     return directory
 
 
@@ -233,6 +249,10 @@ def is_interactive() -> bool:
     a pipe, CI, or a git hook, where nobody can answer questions. --review
     refuses to run then, instead of waiting forever for an answer.
     (It's a separate function so tests can pretend to be a terminal.)
+
+    Both input AND output must be a terminal: with output redirected to a
+    file (`secretscan --review > log.txt`), the questions would be invisible
+    and the program would seem to hang.
     """
     return sys.stdin.isatty() and sys.stdout.isatty()
 
@@ -413,6 +433,8 @@ def build_parser() -> argparse.ArgumentParser:
         "instead of hiding them",
     )
 
+    # Show findings hidden by `secretscan:ignore` comments, so nobody can
+    # hide a key with a comment without a way for others to check.
     parser.add_argument(
         "--include-inline-ignored", action="store_true",
         help="also report candidates suppressed by trailing inline markers",
@@ -611,9 +633,15 @@ def run(argv: list[str] | None = None) -> int:
         except (OSError, UnicodeError):
             issues.append(ScanIssue(str(file), "could not read file", True))
 
-    # Retain suppressed candidates for counts and an explicit audit option.
+    # Count the matches hidden by `secretscan:ignore` comments, so the
+    # summary can say how many there were. `sum` of True/False values counts
+    # the Trues (Python treats True as 1 and False as 0).
+    # With --include-inline-ignored nothing is hidden, so the count is 0.
     inline_count = sum(c.inline_ignored for c in candidates) if not args.include_inline_ignored else 0
+    # The ID of every match, hidden or not. Used at the end to spot ignore
+    # entries that no longer match anything ("stale" entries).
     all_ids = {finding_id(c, root) for c in candidates}
+    # Unless asked to show them, drop the comment-hidden matches now.
     if not args.include_inline_ignored:
         candidates = [c for c in candidates if not c.inline_ignored]
 
@@ -651,6 +679,9 @@ def run(argv: list[str] | None = None) -> int:
         # `realpath` follows a symlinked ignore file to where saving will
         # really write (see save_ignore_file), so the right folder is checked.
         destination = Path(os.path.realpath(ignore_path or root / IGNORE_FILE_NAME))
+        # Try creating (and immediately deleting) a temporary file in that
+        # folder. If that fails, saving would fail too, so stop BEFORE asking
+        # questions rather than after the user answered them all.
         try:
             with tempfile.TemporaryFile(dir=destination.parent):
                 pass
@@ -740,17 +771,27 @@ def run(argv: list[str] | None = None) -> int:
     if inline_count:
         print(f"Ignored {plural(inline_count, 'inline finding')} "
               "(use --include-inline-ignored to see).")
+    # List every skipped path and why, on the error output (stderr), so a
+    # skipped file is never mistaken for a checked one.
     if issues:
         print(f"Skipped {len(issues)} paths; scan coverage is incomplete.", file=sys.stderr)
         for issue in issues:
             print(f"  {display(issue.path)}: {issue.reason}", file=sys.stderr)
-    # Only a complete scan of the project root can identify stale entries.
+    # Point out ignore entries that didn't match anything. They're usually
+    # leftovers from keys that were removed. Only a complete scan of the
+    # whole project root can tell: scanning one file, or skipping a
+    # folder by mistake, would make every other entry look unused.
+    # (`set(a) - b` gives the items in a that aren't in b.)
     if (path.is_dir() and path.resolve() == root
             and all(issue.reason == "excluded directory" for issue in issues)):
         unused = set(ignored_ids) - all_ids
         if unused:
             print(f"Notice: {len(unused)} ignore entries did not match this scan "
                   "(review before removing).", file=sys.stderr)
+    # Exit code 2 ("the result can't be trusted") if anything went wrong
+    # while reading, or if the user named ONE file and it couldn't be
+    # scanned: then "no secrets found" would be a false all-clear.
+    # `any(...)` is True if at least one item is True.
     if any(issue.error for issue in issues) or (issues and not path.is_dir()):
         return 2
 
@@ -763,7 +804,16 @@ def run(argv: list[str] | None = None) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
-    """Keep runtime failures distinct from findings, without exposing secrets."""
+    """Run the command, turning any unexpected problem into exit code 2.
+
+    `run` does the real work. This wrapper exists because Python's normal
+    reaction to an unexpected error is to print a "traceback" (a long
+    error report) and exit with code 1, which is the same code as
+    "secrets found". A git hook or CI system couldn't tell a crash from a
+    finding. So every failure is caught here and becomes exit code 2.
+    """
+    # `try` runs the block; if an error happens, Python jumps to the first
+    # `except` whose type matches, instead of crashing.
     try:
         result = run(argv)
         # Flush here so a closed pipe is caught before interpreter shutdown.
@@ -774,7 +824,9 @@ def main(argv: list[str] | None = None) -> int:
         silence_output()
         return 2
     except KeyboardInterrupt:
+        # The user pressed Ctrl-C during a scan.
         return config_error("scan interrupted")
     except Exception as error:
-        # Exception messages can contain source content; print only the type.
+        # Any other error. Its message could quote file contents (possibly a
+        # key), so print only the error's type name, like "OSError".
         return config_error(f"scan failed ({type(error).__name__})")

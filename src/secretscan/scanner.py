@@ -65,8 +65,13 @@ MAX_FILE_SIZE = 1_000_000
 # without reading whole files twice.
 BINARY_CHECK_BYTES = 8000
 
-# Inline suppression is limited to a trailing comment and one token match.
-# Keeping the marker in one place makes the policy easy to locate.
+# If a line ends with a comment containing this text, its match is hidden.
+# Users can silence a known false alarm this way, e.g. a fake key in docs:
+#
+#     EXAMPLE_KEY = "..."  # secretscan:ignore
+#
+# It only works for a comment at the END of a line with exactly ONE match
+# (see has_inline_ignore for why).
 IGNORE_MARKER = "secretscan:ignore"
 
 
@@ -97,7 +102,9 @@ class Finding:
     # it". (`str | None` means "either a string or None".)
     placeholder_reason: str | None = None
 
-    # Kept for audit output; only a single candidate on a marked line qualifies.
+    # True if a `secretscan:ignore` comment on this line hides this finding.
+    # Hidden findings are kept (not thrown away), so the tool can count them
+    # and show them again with --include-inline-ignored.
     inline_ignored: bool = False
 
 
@@ -109,12 +116,32 @@ def is_too_large(path: Path) -> bool:
 
 
 def text_encoding(start: bytes) -> str:
-    """Recognize Unicode byte-order marks before checking for binary bytes."""
+    """Work out how a file's text is stored, from its first few bytes.
+
+    `start` is the beginning of the file as raw bytes.
+
+    Text can be saved in different "encodings" (ways of turning letters
+    into bytes). Most code is UTF-8, which needs no special marker. But
+    UTF-16 and UTF-32 files (common on Windows) usually begin with a
+    "byte-order mark" (BOM): a few invisible bytes that say which encoding
+    follows. Those encodings also contain lots of zero bytes, which would
+    otherwise make the file look binary, so this check runs first.
+
+    Returns the encoding name Python should use to read the file.
+    """
+    # `startswith` can take a tuple (several options in round brackets);
+    # it's True if the bytes start with ANY of them. The b"..." values are
+    # the BOMs, written as hex bytes: \xff is the byte with value 255.
+    # There are two of each because the bytes can come in either order
+    # ("little-endian" or "big-endian", depending on the computer).
+    #
     # Check UTF-32 first: its little-endian marker starts like UTF-16's.
     if start.startswith((b"\xff\xfe\x00\x00", b"\x00\x00\xfe\xff")):
         return "utf-32"
     if start.startswith((b"\xff\xfe", b"\xfe\xff")):
         return "utf-16"
+    # No marker: assume UTF-8. "utf-8-sig" is UTF-8 that also quietly skips
+    # the optional UTF-8 marker that some Windows editors add.
     return "utf-8-sig"
 
 
@@ -152,47 +179,110 @@ def read_regular_file(path: Path, limit: int) -> bytes:
 
 
 def is_binary(path: Path) -> bool:
+    """Return True if the file looks like binary data rather than text.
+
+    Binary files (images, PDFs, compiled programs) almost always contain a
+    "null byte": a byte with the value zero. Normal UTF-8 text basically
+    never does, so a null byte near the start means "binary".
+    """
+    # Read only the first BINARY_CHECK_BYTES bytes, safely (see
+    # read_regular_file). `[:BINARY_CHECK_BYTES]` trims the extra byte that
+    # read_regular_file reads past the limit.
     start = read_regular_file(path, BINARY_CHECK_BYTES)[:BINARY_CHECK_BYTES]
+    # UTF-16 and UTF-32 text is full of zero bytes, so the null-byte test
+    # only applies to files without one of their markers (see text_encoding).
     return text_encoding(start) == "utf-8-sig" and b"\0" in start
 
 
 @dataclass(frozen=True)
 class ScanIssue:
-    """A skipped path, with a safe reason and whether scanning failed."""
+    """One path that wasn't scanned, and why.
+
+    The command-line tool lists these at the end of a scan, so a skipped
+    file is never silently treated as "no secrets here".
+    """
+
+    # The file or folder that was skipped.
     path: str
+
+    # A short reason that's safe to print, e.g. "binary file". It never
+    # contains file contents.
     reason: str
+
+    # True if something went WRONG (e.g. "could not read file"), as opposed
+    # to an expected skip (e.g. "excluded directory"). Errors make the
+    # scan exit with code 2, because its result can't be trusted.
     error: bool = False
 
 
 def should_scan(path: Path, issues: list[ScanIssue] | None = None) -> bool:
+    """Decide whether a single file is worth scanning.
+
+    If the answer is no and an `issues` list was given, a ScanIssue saying
+    why is added to it. Passing a list in like this lets the caller collect
+    every reason from every file in one place.
+    """
+    # `reason` stays "" (empty) unless we find a reason to skip the file.
     reason = ""
     failed = False
     try:
+        # Check in order, stopping at the first reason found (`elif` means
+        # "otherwise, if"). The cheap checks come first: `is_file` and the
+        # size don't open the file at all.
         if not path.is_file():
+            # Folders, pipes, devices, broken shortcuts...
+            # `a, b = x, y` sets two variables in one line.
             reason, failed = "not a regular file", True
         elif is_too_large(path):
             reason = "over size limit"
         elif is_binary(path):
             reason = "binary file"
     except OSError:
+        # OSError is the error Python raises when the operating system
+        # can't do something with a file, e.g. no permission to read it.
         reason, failed = "could not read file", True
     if reason and issues is not None:
         issues.append(ScanIssue(str(path), reason, failed))
+    # An empty string counts as False, so `not reason` is True ("scan it")
+    # exactly when no reason to skip was found.
     return not reason
 
 
 def find_files(path: Path, issues: list[ScanIssue] | None = None) -> list[Path]:
-    """Find files while recording exclusions and traversal failures."""
+    """Work out which files to scan.
+
+    - If `path` is a single file, the answer is just that file.
+    - If `path` is a folder, the answer is every file inside it, including
+      files in subfolders, except the ones skipped below.
+
+    Every skipped path is recorded in `issues` (if given), with the reason.
+    """
+    # If the caller didn't pass a list, use a throwaway one so the code
+    # below can always add to it.
     if issues is None:
         issues = []
+
+    # A single file: return it in a list, unless it should be skipped.
+    # `[path] if ... else []` is a one-line if/else that picks a value.
     if not path.is_dir():
         return [path] if should_scan(path, issues) else []
 
+    # os.walk silently ignores folders it can't open unless we give it an
+    # `onerror` function. This small function, defined inside find_files,
+    # records each such folder as an issue instead. (A function defined
+    # inside another one can use the outer function's variables, here
+    # `issues`.)
     def walk_error(error: OSError) -> None:
         issues.append(ScanIssue(str(error.filename), "could not read directory", True))
 
     files = []
+
+    # `os.walk` visits `path` and then every folder inside it, one at a time.
+    # For each folder it gives us: the folder's path, the names of the
+    # folders directly inside it, and the names of the files directly inside it.
     for folder, subfolders, filenames in os.walk(path, onerror=walk_error):
+        # Decide which subfolders to go into, in alphabetical order (so the
+        # output is in the same order every run). Skipped ones are recorded.
         kept = []
         for name in sorted(subfolders):
             child = Path(folder) / name
@@ -203,6 +293,10 @@ def find_files(path: Path, issues: list[ScanIssue] | None = None) -> list[Path]:
                 issues.append(ScanIssue(str(child), "symlink directory"))
             else:
                 kept.append(name)
+        # os.walk decides where to go next by reading the `subfolders` list,
+        # so we replace its CONTENTS with only the folders we kept.
+        # `subfolders[:] = ...` changes the existing list that os.walk is
+        # holding; `subfolders = ...` would make a new list it never sees.
         subfolders[:] = kept
         for name in sorted(filenames):
             file = Path(folder) / name
@@ -217,7 +311,17 @@ def find_files(path: Path, issues: list[ScanIssue] | None = None) -> list[Path]:
 
 
 def has_inline_ignore(line: str, matches: list[tuple[Rule, str]]) -> bool:
-    """A trailing marker may dismiss one token, never a whole minified file."""
+    """Return True if this line's `secretscan:ignore` comment should hide its match.
+
+    `matches` is what scan_line found on the line. The comment only counts
+    when ALL of these are true:
+    - the line has exactly ONE match. Otherwise one comment at the end of
+      a minified file (where everything is on one line) could hide every
+      key in the file.
+    - that match isn't a private key (a key spans many lines, and the
+      comment is only on one of them).
+    - the marker is a real comment at the very END of the line.
+    """
     # A header does not identify the private key below it, so it cannot be
     # safely dismissed by a line marker or a header-based fingerprint.
     # The pattern: start of line or a whitespace character, then # or //,
@@ -238,6 +342,9 @@ def scan_line(line: str, rules: list[Rule] = RULES, include_inline: bool = False
     An empty list means the line looks clean (or was marked to be ignored).
 
     `rules` defaults to all the real rules, but tests can pass in their own.
+    `include_inline=True` means "report matches even if the line has a
+    secretscan:ignore comment". scan_file uses it so it can count how many
+    matches the comments hid, instead of losing track of them.
     """
     matches = []
 
@@ -248,6 +355,8 @@ def scan_line(line: str, rules: list[Rule] = RULES, include_inline: bool = False
             # `match.group(0)` is the exact text the pattern matched.
             matches.append((rule, match.group(0)))
 
+    # Only after finding the matches can we tell whether the comment
+    # applies (it needs exactly one match; see has_inline_ignore).
     if not include_inline and has_inline_ignore(line, matches):
         return []
     return matches
