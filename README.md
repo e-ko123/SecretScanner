@@ -157,18 +157,24 @@ secretscan config.py         # scan a single file
 **Example output:**
 
 ```text
-config.py:12    AWS Access Key ID         AKIA****************
-src/app.js:40   Generic Secret            sup3*************
-keys/id_rsa:1   Private Key               ----***********************
+config.py:12    AWS Access Key ID   AKIA****************
+src/app.js:40   Generic Secret      sup3*************
+keys/id_rsa:1   Private Key         ----***************************
 
-Found 3 possible secrets in 2 files.
+Found 3 possible secrets in 3 files.
 ```
 
 Each line shows:
 
 - **Where:** the file and line number (`config.py:12` means line 12 of `config.py`).
 - **What:** the type of secret it looks like.
-- **A masked preview:** only the first 4 characters are shown. The rest are replaced with `*`, so **secretscan never prints a full secret to your screen** (where it could end up in logs, screenshots, or screen shares).
+- **A masked preview:** only the first 4 characters are shown. The rest are replaced with `*`, so **secretscan never prints a full secret to your screen** (where it could end up in logs, screenshots, or screen shares). Short secrets (8 characters or fewer) are hidden completely, since showing 4 characters would give most of them away.
+
+The last line is a summary. If nothing is found, that's the only line you'll see:
+
+```text
+No secrets found.
+```
 
 ### Scan only what you're about to commit
 
