@@ -19,6 +19,9 @@ from __future__ import annotations
 # (like `--help` or `--version`). It also writes the help text for us.
 import argparse
 
+# `sys.stderr` is the "error output" stream, where error messages go.
+import sys
+
 # `version()` looks up the version number of an installed package.
 # We use it so the version only lives in one place (pyproject.toml),
 # instead of being typed out in two files that could get out of sync.
@@ -26,6 +29,14 @@ from importlib.metadata import version
 
 # `Path` represents a file or folder location (see scanner.py).
 from pathlib import Path
+
+# Fingerprints and the .secretscanignore file (see ignores.py).
+from secretscan.ignores import (
+    IGNORE_FILE_NAME,
+    IgnoreFileError,
+    finding_id,
+    load_ignore_file,
+)
 
 # `find_files` works out which files to scan; `scan_file` scans one file.
 # `Finding` is the type that holds one result (used in type hints below).
@@ -61,12 +72,15 @@ def mask(secret: str) -> str:
     return secret[:VISIBLE_CHARS] + "*" * hidden_count
 
 
-def print_findings(findings: list[Finding]) -> None:
+def print_findings(findings: list[Finding], ids: list[str] | None = None) -> None:
     """Print one line per finding, lined up in neat columns.
 
     Example output:
         src/settings.py:3   AWS Access Key ID   AKIA****************
         config/dev.py:12    AWS Access Key ID   AKIA****************
+
+    If `ids` is given (with --show-ids), each finding's full ID is added as
+    a last column. `ids[0]` belongs to `findings[0]`, and so on.
 
     A finding is only printed with a placeholder reason when the user asked
     to see placeholders (--include-placeholders). The reason is added at
@@ -81,18 +95,25 @@ def print_findings(findings: list[Finding]) -> None:
     location_width = max(len(location) for location in locations)
     rule_width = max(len(finding.rule_name) for finding in findings)
 
-    # `zip` walks through two lists side by side, giving us one item from
-    # each at a time: (first location, first finding), (second, second)...
-    for location, finding in zip(locations, findings):
+    # The secret itself is ALWAYS passed through mask() first: the tool
+    # must never print a full secret.
+    masked = [mask(finding.secret) for finding in findings]
+    masked_width = max(len(text) for text in masked)
+
+    # `enumerate` gives each finding together with its position (0, 1, 2...),
+    # which we use to pick the matching item from the other lists.
+    for index, finding in enumerate(findings):
         # `ljust(width)` pads text with spaces on the right until it's
         # `width` characters long. That's what makes the columns line up.
-        # The secret itself is ALWAYS passed through mask() first: the
-        # tool must never print a full secret.
         line = (
-            f"{location.ljust(location_width)}   "
+            f"{locations[index].ljust(location_width)}   "
             f"{finding.rule_name.ljust(rule_width)}   "
-            f"{mask(finding.secret)}"
         )
+        if ids is not None:
+            # Pad the masked secret too, so the ID column lines up.
+            line += f"{masked[index].ljust(masked_width)}   {ids[index]}"
+        else:
+            line += masked[index]
         if finding.placeholder_reason:
             line += f"   (recognized placeholder: {finding.placeholder_reason})"
         print(line)
@@ -139,6 +160,18 @@ def summary(findings: list[Finding], anything_hidden: bool = False) -> str:
     )
 
 
+def config_error(message: str) -> int:
+    """Print a configuration error and return exit code 2.
+
+    Used for problems with the ignore file. Exit code 2 means "something
+    is wrong with how secretscan was set up", never "secrets found" (1).
+    """
+    # `file=sys.stderr` sends the message to the error output, like
+    # argparse does with its own errors.
+    print(f"secretscan: error: {message}", file=sys.stderr)
+    return 2
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Describe the options the `secretscan` command accepts.
 
@@ -175,6 +208,33 @@ def build_parser() -> argparse.ArgumentParser:
         "instead of hiding them",
     )
 
+    # Show each finding's full ID, so it can be copied into the ignore file.
+    parser.add_argument(
+        "--show-ids",
+        action="store_true",
+        help="show each finding's ID (for dismissing it in a "
+        f"{IGNORE_FILE_NAME} file)",
+    )
+
+    # --ignore-file and --no-ignore contradict each other ("use this ignore
+    # file" vs "use no ignore file"). A "mutually exclusive group" tells
+    # argparse to reject a command that uses both, with exit code 2.
+    ignore_options = parser.add_mutually_exclusive_group()
+    ignore_options.add_argument(
+        "--ignore-file",
+        # `metavar` is the placeholder name shown in --help: "--ignore-file PATH".
+        metavar="PATH",
+        help=f"use this ignore file instead of {IGNORE_FILE_NAME} in the "
+        "scanned folder",
+    )
+    ignore_options.add_argument(
+        "--no-ignore",
+        action="store_true",
+        help=f"don't use any ignore file (show findings dismissed in "
+        f"{IGNORE_FILE_NAME}); placeholders and secretscan:ignore lines "
+        "are still skipped",
+    )
+
     # Add a `--version` option. `action="version"` is a built-in argparse
     # behavior: it prints the text below and then exits the program.
     # `%(prog)s` is filled in by argparse with the program name ("secretscan").
@@ -197,8 +257,9 @@ def main(argv: list[str] | None = None) -> int:
     - In tests, we pass a list directly, e.g. main(["config.py"]). This lets
       us test the command without opening a real terminal.
 
-    Returns the exit code: 0 = nothing reportable found, 1 = secrets found.
-    Hidden placeholders don't count as found.
+    Returns the exit code: 0 = nothing reportable found, 1 = secrets found,
+    2 = the command or the ignore file is wrong. Hidden placeholders and
+    findings dismissed in the ignore file don't count as found.
     (The exit code is how git hooks and CI know whether to block or pass.)
     """
     parser = build_parser()
@@ -216,6 +277,43 @@ def main(argv: list[str] | None = None) -> int:
     if not path.exists():
         parser.error(f"path not found: {path}")
 
+    # The "scan root" is the folder that finding IDs are relative to, and
+    # where we look for the ignore file. When scanning a folder, it's that
+    # folder; when scanning one file, it's the folder the file is in.
+    if path.is_dir():
+        root = path
+    else:
+        root = path.parent
+
+    # Work out which ignore file to use, if any.
+    # `Path | None` in a type hint means "a Path, or None".
+    ignore_path: Path | None
+    if args.no_ignore:
+        ignore_path = None
+    elif args.ignore_file is not None:
+        # The user named a file, so it must exist.
+        ignore_path = Path(args.ignore_file)
+        if not ignore_path.is_file():
+            return config_error(f"ignore file not found: {ignore_path}")
+    else:
+        # Otherwise use .secretscanignore in the scan root, if it's there.
+        # A missing default ignore file is normal: most projects won't have one.
+        default = root / IGNORE_FILE_NAME
+        if default.is_file():
+            ignore_path = default
+        else:
+            ignore_path = None
+
+    # Load the ignore file now, before scanning, so a broken file stops
+    # everything with a clear error instead of being treated as empty.
+    # `ignored_ids` maps each dismissed ID to the reason the user gave.
+    ignored_ids: dict[str, str] = {}
+    if ignore_path is not None:
+        try:
+            ignored_ids = load_ignore_file(ignore_path)
+        except IgnoreFileError as error:
+            return config_error(f"ignore file {ignore_path}: {error}")
+
     # The scan happens in clear stages, each with one job.
 
     # Stage 1: detect candidates. Scan every file and collect every match
@@ -223,6 +321,11 @@ def main(argv: list[str] | None = None) -> int:
     # another (unlike `append`, which would add the whole list as one item).
     candidates = []
     for file in find_files(path):
+        # Don't scan the ignore file itself: it's settings, not code.
+        # `resolve()` turns both into full, absolute paths, so the same
+        # file written two different ways still compares as equal.
+        if ignore_path is not None and file.resolve() == ignore_path.resolve():
+            continue
         candidates.extend(scan_file(file))
 
     # Stage 2: set aside recognized placeholders, unless the user asked to
@@ -235,16 +338,35 @@ def main(argv: list[str] | None = None) -> int:
         findings = [c for c in candidates if c.placeholder_reason is None]
         placeholders = [c for c in candidates if c.placeholder_reason is not None]
 
-    # Print the findings (if there are any), then a blank line to separate
-    # them from the summary. print_findings can't handle an empty list,
-    # because there'd be nothing to measure the columns from.
-    if findings:
-        print_findings(findings)
+    # Stage 3: give every remaining finding its ID (fingerprint).
+    # Stage 4: drop findings whose ID is in the ignore file.
+    # `reportable` and `reportable_ids` stay in step: item 0 of one belongs
+    # with item 0 of the other.
+    reportable = []
+    reportable_ids = []
+    ignored_count = 0
+    for finding in findings:
+        this_id = finding_id(finding, root)
+        if this_id in ignored_ids:
+            ignored_count += 1
+        else:
+            reportable.append(finding)
+            reportable_ids.append(this_id)
+
+    # Stage 5: print the findings (if there are any), then a blank line to
+    # separate them from the summary. print_findings can't handle an empty
+    # list, because there'd be nothing to measure the columns from.
+    if reportable:
+        if args.show_ids:
+            print_findings(reportable, reportable_ids)
+        else:
+            print_findings(reportable)
         print()
 
-    # Always finish with a summary, so the user knows the scan really ran,
-    # even when nothing was found.
-    print(summary(findings, anything_hidden=bool(placeholders)))
+    # Stage 6: always finish with a summary, so the user knows the scan
+    # really ran, even when nothing was found.
+    anything_hidden = bool(placeholders) or ignored_count > 0
+    print(summary(reportable, anything_hidden=anything_hidden))
 
     # If anything was hidden, say how much, and how to see it. Hiding
     # things silently would leave the user no way to double-check us.
@@ -253,9 +375,15 @@ def main(argv: list[str] | None = None) -> int:
             f"Suppressed {plural(len(placeholders), 'recognized placeholder')} "
             "(use --include-placeholders to see)."
         )
+    if ignored_count:
+        print(
+            f"Ignored {plural(ignored_count, 'finding')} listed in {ignore_path} "
+            "(use --no-ignore to see)."
+        )
 
     # An empty list counts as False in Python, so this reads as:
-    # "if anything was found, exit with 1; otherwise exit with 0".
-    if findings:
+    # "if anything is left to report, exit with 1; otherwise exit with 0".
+    # Hidden placeholders and dismissed findings don't count.
+    if reportable:
         return 1
     return 0
