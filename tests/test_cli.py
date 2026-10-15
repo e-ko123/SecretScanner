@@ -11,7 +11,8 @@ import pytest
 
 # Import the function we want to test. This works because the project is
 # installed (`pip install -e ".[dev]"`), so Python can find the package.
-from secretscan.cli import main, mask
+from secretscan.cli import main, mask, summary
+from secretscan.scanner import Finding
 
 FAKE_AWS_KEY = "AKIA" + "X" * 16
 
@@ -36,6 +37,29 @@ def test_mask_hides_short_secrets_completely():
 def test_mask_shows_start_just_above_the_short_limit():
     # 9 characters: long enough that 4 shown still leaves 5 hidden.
     assert mask("abcdefghi") == "abcd*****"
+
+
+# --- summary ---------------------------------------------------------------
+
+def make_finding(path):
+    # A small helper so the summary tests don't repeat the same 4 fields.
+    # Only the path matters for counting files; the rest is filler.
+    return Finding(path=path, line_number=1, rule_name="AWS Access Key ID",
+                   secret=FAKE_AWS_KEY)
+
+
+def test_summary_when_nothing_found():
+    assert summary([]) == "No secrets found."
+
+
+def test_summary_uses_singular_for_one():
+    assert summary([make_finding("a.py")]) == "Found 1 possible secret in 1 file."
+
+
+def test_summary_counts_different_files_not_findings():
+    # 3 findings, but two are in the same file, so only 2 files.
+    findings = [make_finding("a.py"), make_finding("a.py"), make_finding("b.py")]
+    assert summary(findings) == "Found 3 possible secrets in 2 files."
 
 
 # --- main ------------------------------------------------------------------
@@ -91,13 +115,25 @@ def test_findings_are_lined_up_in_columns(tmp_path, capsys):
     assert lines[0].index("AWS") == lines[1].index("AWS")
 
 
-def test_clean_file_exits_0_and_prints_nothing(tmp_path, capsys):
+def test_clean_file_exits_0_and_says_so(tmp_path, capsys):
     file = tmp_path / "clean.py"
     file.write_text("print('hello')\n")
 
     # Exit code 0 means "nothing found".
     assert main([str(file)]) == 0
-    assert capsys.readouterr().out == ""
+    # The only output is the summary. "\n" is the line break print() adds.
+    assert capsys.readouterr().out == "No secrets found.\n"
+
+
+def test_summary_is_printed_after_findings(tmp_path, capsys):
+    file = tmp_path / "config.py"
+    file.write_text(f"AWS_KEY = '{FAKE_AWS_KEY}'\n")
+
+    main([str(file)])
+
+    lines = capsys.readouterr().out.splitlines()
+    # `lines[-1]` means "the last item" in a list.
+    assert lines[-1] == "Found 1 possible secret in 1 file."
 
 
 def test_folder_with_secret_reports_file_inside_it(tmp_path, capsys):
@@ -113,6 +149,7 @@ def test_folder_with_secret_reports_file_inside_it(tmp_path, capsys):
     assert f"{secret_file}:1" in output
     # Only the file with the secret should be reported.
     assert "clean.py" not in output
+    assert "Found 1 possible secret in 1 file." in output
 
 
 def test_no_path_scans_current_folder(tmp_path, monkeypatch, capsys):

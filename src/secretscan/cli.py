@@ -91,6 +91,39 @@ def print_findings(findings: list[Finding]) -> None:
         )
 
 
+def plural(count: int, word: str) -> str:
+    """Return e.g. "1 file" or "3 files", so the summary reads naturally."""
+    if count == 1:
+        return f"{count} {word}"
+    return f"{count} {word}s"
+
+
+def summary(findings: list[Finding]) -> str:
+    """Return the one-line summary printed at the end of a scan.
+
+    Examples:
+        "No secrets found."
+        "Found 1 possible secret in 1 file."
+        "Found 3 possible secrets in 2 files."
+
+    It says "possible" on purpose: the tool can't be 100% sure, because
+    some matches may be fake keys or examples.
+    """
+    if not findings:
+        return "No secrets found."
+
+    # Count how many DIFFERENT files had findings. One file can have
+    # several findings, so we can't just use len(findings).
+    # `{... for ...}` (curly braces) builds a set, and a set automatically
+    # throws away duplicates. So its size is the number of different files.
+    file_count = len({finding.path for finding in findings})
+
+    return (
+        f"Found {plural(len(findings), 'possible secret')} "
+        f"in {plural(file_count, 'file')}."
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Describe the options the `secretscan` command accepts.
 
@@ -164,10 +197,16 @@ def main(argv: list[str] | None = None) -> int:
     for file in find_files(path):
         findings.extend(scan_file(file))
 
-    # Print the findings (if there are any). print_findings can't handle an
-    # empty list, because there'd be nothing to measure the columns from.
+    # Print the findings (if there are any), then a blank line to separate
+    # them from the summary. print_findings can't handle an empty list,
+    # because there'd be nothing to measure the columns from.
     if findings:
         print_findings(findings)
+        print()
+
+    # Always finish with a summary, so the user knows the scan really ran,
+    # even when nothing was found.
+    print(summary(findings))
 
     # An empty list counts as False in Python, so this reads as:
     # "if anything was found, exit with 1; otherwise exit with 0".
