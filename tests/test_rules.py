@@ -9,6 +9,7 @@ from secretscan.rules import (
     AWS_ACCESS_KEY_ID,
     GITHUB_FINE_GRAINED_TOKEN,
     GITHUB_TOKEN,
+    GOOGLE_API_KEY,
     SLACK_TOKEN,
     STRIPE_LIVE_SECRET_KEY,
 )
@@ -163,3 +164,32 @@ def test_stripe_rule_ignores_test_keys():
 def test_stripe_rule_ignores_key_that_is_too_short():
     key = "sk_live_" + "a" * 23
     assert STRIPE_LIVE_SECRET_KEY.pattern.search(key) is None
+
+
+# --- Google ----------------------------------------------------------------
+
+def test_google_rule_matches_a_key():
+    key = "AIza" + "a" * 35
+    match = GOOGLE_API_KEY.pattern.search(f'GOOGLE_KEY = "{key}"')
+    assert match is not None
+    assert match.group(0) == key
+
+
+def test_google_rule_matches_key_ending_in_a_dash():
+    # This is why the pattern has no \b at the end: a key ending in "-"
+    # followed by a quote would otherwise be missed.
+    key = "AIza" + "a" * 34 + "-"
+    match = GOOGLE_API_KEY.pattern.search(f'"{key}"')
+    assert match is not None
+    assert match.group(0) == key
+
+
+def test_google_rule_ignores_key_that_is_too_short():
+    key = "AIza" + "a" * 34
+    assert GOOGLE_API_KEY.pattern.search(key) is None
+
+
+def test_google_rule_is_case_sensitive():
+    # "AIZA" (capital Z and A) isn't how Google keys start.
+    key = "AIZA" + "a" * 35
+    assert GOOGLE_API_KEY.pattern.search(key) is None

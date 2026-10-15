@@ -150,6 +150,29 @@ STRIPE_LIVE_SECRET_KEY = Rule(
 )
 
 
+# ---------------------------------------------------------------------------
+# Google API key
+# ---------------------------------------------------------------------------
+# Real example shape: AIza followed by 35 more characters (39 total).
+# Used for Google Maps, YouTube, Firebase, and other Google services.
+#
+# The pattern, piece by piece:
+#   \b               word boundary: nothing glued on the left.
+#   AIza             the exact text "AIza" (note the lowercase "z" and "a").
+#   [0-9A-Za-z_-]    one digit, letter, underscore, or dash...
+#   {35}             ...repeated exactly 35 times.
+#
+# Why no \b at the end, unlike the other rules? A word boundary only exists
+# between a "word" character (letter, digit, underscore) and a non-word
+# character. Google keys can END with a dash, which is a non-word character,
+# so if the key is followed by a quote or a space (also non-word), there's no
+# boundary there and \b would wrongly fail. Leaving it off is the simple fix.
+GOOGLE_API_KEY = Rule(
+    name="Google API Key",
+    pattern=re.compile(r"\bAIza[0-9A-Za-z_-]{35}"),
+)
+
+
 # Every rule the scanner uses. The scanner loops over this list, so adding
 # a new rule here is all it takes for it to be checked.
 RULES = [
@@ -158,4 +181,5 @@ RULES = [
     GITHUB_FINE_GRAINED_TOKEN,
     SLACK_TOKEN,
     STRIPE_LIVE_SECRET_KEY,
+    GOOGLE_API_KEY,
 ]
