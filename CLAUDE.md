@@ -56,9 +56,9 @@ Files are added when there's real code to put in them.
 ### Phase 1: Core CLI tool
 
 - `secretscan <path>` scans a file or folder (default: current folder).
-- Detect, using regular expressions: AWS access key IDs, GitHub tokens, Slack tokens, Stripe live secret keys, Google API keys, OpenAI and Anthropic API keys, private key blocks (`-----BEGIN ... PRIVATE KEY-----`), and generic hard-coded passwords/secrets like `password = "..."` or `api_key: "..."`.
+- Detect, using regular expressions: AWS access key IDs, GitHub tokens, Slack tokens, Stripe secret keys (live and test), Google API keys, OpenAI and Anthropic API keys, private key blocks (`-----BEGIN ... PRIVATE KEY-----`), and generic hard-coded passwords/secrets like `password = "..."` or `api_key: "..."`.
 - The generic rule uses a Shannon entropy (randomness) check to skip obvious placeholders like "changeme".
-- Skip folders: `.git`, `node_modules`, `.venv`, `venv`, `__pycache__`, `dist`, `build`.
+- Skip folders: `.git`, `node_modules`, `.venv`, `venv`, `__pycache__`. (`dist` and `build` ARE scanned: build output often has keys baked in, and if it's committed, those keys leak.)
 - Skip binary files and files over ~1 MB.
 - Output shows file, line number, and type of secret.
 - Mask secrets in output, showing only the first 4 characters (e.g. `AKIA************`). Never print a full secret.

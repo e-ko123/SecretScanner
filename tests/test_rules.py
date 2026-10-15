@@ -18,6 +18,7 @@ from secretscan.rules import (
     PRIVATE_KEY,
     SLACK_TOKEN,
     STRIPE_LIVE_SECRET_KEY,
+    STRIPE_TEST_SECRET_KEY,
     Rule,
 )
 
@@ -161,10 +162,25 @@ def test_stripe_rule_matches_longer_newer_keys():
     assert STRIPE_LIVE_SECRET_KEY.pattern.search(key).group(0) == key
 
 
-def test_stripe_rule_ignores_test_keys():
-    # Test-mode keys can't move real money, so they aren't reported.
+def test_stripe_live_rule_ignores_test_keys():
+    # Test-mode keys have their own rule, so the live rule doesn't match them.
     key = "sk_test_" + "a" * 24
     assert STRIPE_LIVE_SECRET_KEY.pattern.search(key) is None
+
+
+def test_stripe_test_rule_matches_secret_and_restricted_test_keys():
+    # Test keys can't move real money, but Stripe still says to keep them
+    # secret, so they're reported under their own rule.
+    for prefix in ["sk_test_", "rk_test_"]:
+        key = prefix + "Ab12Cd" * 4
+        match = STRIPE_TEST_SECRET_KEY.pattern.search(f'stripe.api_key = "{key}"')
+        assert match is not None
+        assert match.group(0) == key
+
+
+def test_stripe_test_rule_ignores_publishable_keys():
+    # Publishable keys (pk_) are meant to be public, e.g. in website code.
+    assert STRIPE_TEST_SECRET_KEY.pattern.search("pk_test_" + "Ab12Cd" * 4) is None
 
 
 def test_stripe_rule_ignores_key_that_is_too_short():
@@ -302,7 +318,8 @@ def test_body_group_is_the_part_after_the_prefix():
 def test_only_rules_with_a_simple_body_define_one():
     # `groupindex` is a dictionary of a pattern's NAMED groups. These rules
     # have one clear "variable part", so they define a body...
-    for rule in [AWS_ACCESS_KEY_ID, GITHUB_TOKEN, STRIPE_LIVE_SECRET_KEY, GOOGLE_API_KEY, OPENAI_API_KEY]:
+    for rule in [AWS_ACCESS_KEY_ID, GITHUB_TOKEN, STRIPE_LIVE_SECRET_KEY, STRIPE_TEST_SECRET_KEY,
+                 GOOGLE_API_KEY, OPENAI_API_KEY]:
         assert "body" in rule.pattern.groupindex
     # ...and these have several parts (or, for private keys, only a
     # header), so they don't.

@@ -64,7 +64,7 @@ KNOWN_EXAMPLES = {
 #
 # The rules for this check, all of which must be true:
 #   1. The rule defines a "body" group (see rules.py). Only AWS, GitHub
-#      classic tokens, Stripe, Google, and OpenAI keys do. Other multipart rules
+#      classic tokens, Stripe (live and test), Google, and OpenAI keys do. Other multipart rules
 #      (Slack, Anthropic, GitHub fine-grained) and private-key
 #      headers are never checked, because we don't want to guess where their
 #      variable part starts.

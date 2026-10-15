@@ -428,6 +428,7 @@ This shows recognized placeholders, external dismissals, and inline dismissals w
 | **GitHub fine-grained token** | `gith*************************…` | Starts with `github_pat_`, GitHub's newer kind of token |
 | **Slack token** | `xoxb**************************` | Prefixes `xoxb-`, `xoxp-`, `xoxa-`, `xoxr-`, `xoxs-`, refresh tokens `xoxe-`, workflow tokens `xwfp-`, app tokens `xapp-`, and rotated tokens starting `xoxe.` |
 | **Stripe live secret key** | `sk_l************************` | Live secret and restricted keys (`sk_live_`, `rk_live_`) |
+| **Stripe test secret key** | `sk_t************************` | Test-mode secret and restricted keys (`sk_test_`, `rk_test_`). They can't move real money, but [Stripe says not to expose them](https://docs.stripe.com/keys) |
 | **Google API key** | `AIza***********************************` | Starts with `AIza`, 39 characters total |
 | **OpenAI API key** | `sk-p****************************…` | Legacy `sk-` plus 48 alphanumeric characters, or `sk-proj-` / `sk-svcacct-` plus a token body |
 | **Anthropic API key** | `sk-a****************************…` | Starts with `sk-ant-` |

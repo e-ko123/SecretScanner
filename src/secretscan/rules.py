@@ -219,9 +219,8 @@ SLACK_TOKEN = Rule(
 # ---------------------------------------------------------------------------
 # Real example shape: sk_live_ followed by 24 or more letters and digits.
 #
-# We only look for LIVE keys ("sk_live_"), not test keys ("sk_test_").
-# Test keys only work in Stripe's practice mode and can't move real money,
-# so reporting them would mostly be noise.
+# This rule is for LIVE keys, which move real money. Test keys have their
+# own rule below, so each kind keeps its own ID and name.
 #
 # The pattern, piece by piece:
 #   (?:sk|rk)_live_  live secret keys or restricted keys (rk).
@@ -234,6 +233,27 @@ STRIPE_LIVE_SECRET_KEY = Rule(
     name="Stripe Live Secret Key",
     pattern=re.compile(r"(?:sk|rk)_live_(?P<body>[0-9a-zA-Z]{24,})"),
     id="stripe-live-secret-key",
+)
+
+
+# ---------------------------------------------------------------------------
+# Stripe test secret key
+# https://docs.stripe.com/keys
+# ---------------------------------------------------------------------------
+# Same shape as a live key, but "test" instead of "live". Test keys only work
+# in Stripe's practice mode ("sandbox") with fake cards, so they can't move
+# real money. They're still secrets: anyone holding one can read and change
+# your sandbox data, and Stripe's docs list secret and restricted keys as
+# "not safe to expose".
+#
+# The pattern is the live pattern with "test" in place of "live":
+#   (?:sk|rk)_test_  a secret key (sk) or restricted key (rk) in test mode.
+#   (?P<body>[0-9a-zA-Z]{24,})  24 or more letters and digits.
+# (Publishable keys, pk_test_, are meant to be public, so they don't match.)
+STRIPE_TEST_SECRET_KEY = Rule(
+    name="Stripe Test Secret Key",
+    pattern=re.compile(r"(?:sk|rk)_test_(?P<body>[0-9a-zA-Z]{24,})"),
+    id="stripe-test-secret-key",
 )
 
 
@@ -366,6 +386,7 @@ RULES = [
     GITHUB_FINE_GRAINED_TOKEN,
     SLACK_TOKEN,
     STRIPE_LIVE_SECRET_KEY,
+    STRIPE_TEST_SECRET_KEY,
     GOOGLE_API_KEY,
     ANTHROPIC_API_KEY,
     OPENAI_API_KEY,
