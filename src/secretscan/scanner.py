@@ -51,6 +51,15 @@ MAX_FILE_SIZE = 1_000_000
 # without reading whole files twice.
 BINARY_CHECK_BYTES = 8000
 
+# If a line contains this text, it's skipped. This lets users silence a
+# false alarm on purpose, e.g. a fake key in documentation:
+#
+#     EXAMPLE_KEY = "..."  # secretscan:ignore
+#
+# We only look for the text itself, not a specific comment symbol, so it
+# works in any language: `# ...` in Python, `// ...` in JavaScript, etc.
+IGNORE_MARKER = "secretscan:ignore"
+
 
 @dataclass(frozen=True)
 class Finding:
@@ -169,10 +178,16 @@ def scan_line(line: str, rules: list[Rule] = RULES) -> list[tuple[Rule, str]]:
     """Check one line of text against every rule.
 
     Returns a list of (rule, matched_text) pairs, one for each match.
-    An empty list means the line looks clean.
+    An empty list means the line looks clean (or was marked to be ignored).
 
     `rules` defaults to all the real rules, but tests can pass in their own.
     """
+    # The user marked this line as "not a real secret", so report nothing.
+    # Checking here (rather than in scan_file) means every way of scanning
+    # gets this behavior for free, including staged scanning later on.
+    if IGNORE_MARKER in line:
+        return []
+
     matches = []
 
     for rule in rules:

@@ -125,6 +125,16 @@ def test_clean_file_exits_0_and_says_so(tmp_path, capsys):
     assert capsys.readouterr().out == "No secrets found.\n"
 
 
+def test_ignored_secret_exits_0(tmp_path, capsys):
+    # A file whose only secret is marked to be ignored counts as clean,
+    # so the exit code is 0. (Later, this is what lets a commit through.)
+    file = tmp_path / "docs.py"
+    file.write_text(f"EXAMPLE = '{FAKE_AWS_KEY}'  # secretscan:ignore\n")
+
+    assert main([str(file)]) == 0
+    assert capsys.readouterr().out == "No secrets found.\n"
+
+
 def test_summary_is_printed_after_findings(tmp_path, capsys):
     file = tmp_path / "config.py"
     file.write_text(f"AWS_KEY = '{FAKE_AWS_KEY}'\n")

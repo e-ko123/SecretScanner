@@ -154,6 +154,33 @@ def test_scan_line_returns_empty_list_for_clean_line():
     assert scan_line("print('hello world')") == []
 
 
+# --- the secretscan:ignore comment -----------------------------------------
+
+def test_scan_line_skips_line_with_ignore_comment():
+    # A Python-style comment.
+    assert scan_line(f"key = '{FAKE_AWS_KEY}'  # secretscan:ignore") == []
+
+
+def test_ignore_comment_works_in_other_languages():
+    # A JavaScript-style comment. The scanner only looks for the text
+    # "secretscan:ignore", so the comment symbol doesn't matter.
+    assert scan_line(f"const key = '{FAKE_AWS_KEY}'; // secretscan:ignore") == []
+
+
+def test_ignore_comment_only_affects_its_own_line(tmp_path):
+    # Line 1 is ignored on purpose; line 2 has no marker, so it's reported.
+    file = tmp_path / "config.py"
+    file.write_text(
+        f"EXAMPLE = '{FAKE_AWS_KEY}'  # secretscan:ignore\n"
+        f"REAL = '{FAKE_AWS_KEY}'\n"
+    )
+
+    findings = scan_file(file)
+
+    assert len(findings) == 1
+    assert findings[0].line_number == 2
+
+
 # --- scan_file -------------------------------------------------------------
 
 def test_scan_file_reports_correct_line_number(tmp_path):
