@@ -6,6 +6,7 @@ instead ("AKIA" + "X" * 16), so the full key string never appears here.
 """
 
 from secretscan.rules import (
+    ANTHROPIC_API_KEY,
     AWS_ACCESS_KEY_ID,
     GITHUB_FINE_GRAINED_TOKEN,
     GITHUB_TOKEN,
@@ -193,3 +194,20 @@ def test_google_rule_is_case_sensitive():
     # "AIZA" (capital Z and A) isn't how Google keys start.
     key = "AIZA" + "a" * 35
     assert GOOGLE_API_KEY.pattern.search(key) is None
+
+
+# --- Anthropic -------------------------------------------------------------
+
+# A fake Anthropic key in the real shape: sk-ant-api03-<long random part>.
+FAKE_ANTHROPIC_KEY = "sk-ant-" + "api03-" + "a" * 90
+
+
+def test_anthropic_rule_matches_a_key():
+    match = ANTHROPIC_API_KEY.pattern.search(f'ANTHROPIC_API_KEY="{FAKE_ANTHROPIC_KEY}"')
+    assert match is not None
+    assert match.group(0) == FAKE_ANTHROPIC_KEY
+
+
+def test_anthropic_rule_ignores_short_placeholder():
+    # Documentation often shows a short placeholder like this.
+    assert ANTHROPIC_API_KEY.pattern.search("sk-ant-xxxx") is None

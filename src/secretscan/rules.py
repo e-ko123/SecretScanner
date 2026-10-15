@@ -173,6 +173,26 @@ GOOGLE_API_KEY = Rule(
 )
 
 
+# ---------------------------------------------------------------------------
+# Anthropic API key
+# ---------------------------------------------------------------------------
+# Real example shape: sk-ant- followed by a long run of letters, digits,
+# dashes, and underscores (e.g. sk-ant-api03-<about 95 more characters>).
+#
+# The pattern, piece by piece:
+#   \b              word boundary: nothing glued on the left.
+#   sk-ant-         the exact text "sk-ant-" ("sk" = secret key, "ant" =
+#                   Anthropic).
+#   [0-9A-Za-z_-]   one digit, letter, underscore, or dash...
+#   {32,}           ...repeated 32 OR MORE times. Real keys are much longer;
+#                   "at least 32" is enough to skip short placeholder text
+#                   like "sk-ant-xxxx" in documentation.
+ANTHROPIC_API_KEY = Rule(
+    name="Anthropic API Key",
+    pattern=re.compile(r"\bsk-ant-[0-9A-Za-z_-]{32,}"),
+)
+
+
 # Every rule the scanner uses. The scanner loops over this list, so adding
 # a new rule here is all it takes for it to be checked.
 RULES = [
@@ -182,4 +202,5 @@ RULES = [
     SLACK_TOKEN,
     STRIPE_LIVE_SECRET_KEY,
     GOOGLE_API_KEY,
+    ANTHROPIC_API_KEY,
 ]
