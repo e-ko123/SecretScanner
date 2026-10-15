@@ -58,11 +58,10 @@ def test_aws_rule_ignores_lowercase():
     assert AWS_ACCESS_KEY_ID.pattern.search(line) is None
 
 
-def test_aws_rule_ignores_key_glued_to_other_letters():
-    # The word boundary (\b) at the start of the pattern means "AKIA"
-    # must not be stuck onto the end of another word.
+def test_aws_rule_finds_key_glued_to_other_letters():
+    # Prefixes can follow escaped text or identifiers without whitespace.
     line = "NOT" + FAKE_AWS_KEY
-    assert AWS_ACCESS_KEY_ID.pattern.search(line) is None
+    assert AWS_ACCESS_KEY_ID.pattern.search(line).group(0) == FAKE_AWS_KEY
 
 
 # --- GitHub ----------------------------------------------------------------
@@ -303,10 +302,10 @@ def test_body_group_is_the_part_after_the_prefix():
 def test_only_rules_with_a_simple_body_define_one():
     # `groupindex` is a dictionary of a pattern's NAMED groups. These rules
     # have one clear "variable part", so they define a body...
-    for rule in [AWS_ACCESS_KEY_ID, GITHUB_TOKEN, STRIPE_LIVE_SECRET_KEY, GOOGLE_API_KEY]:
+    for rule in [AWS_ACCESS_KEY_ID, GITHUB_TOKEN, STRIPE_LIVE_SECRET_KEY, GOOGLE_API_KEY, OPENAI_API_KEY]:
         assert "body" in rule.pattern.groupindex
     # ...and these have several parts (or, for private keys, only a
     # header), so they don't.
     for rule in [GITHUB_FINE_GRAINED_TOKEN, SLACK_TOKEN, ANTHROPIC_API_KEY,
-                 OPENAI_API_KEY, PRIVATE_KEY]:
+                 PRIVATE_KEY]:
         assert "body" not in rule.pattern.groupindex

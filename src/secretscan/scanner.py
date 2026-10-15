@@ -16,6 +16,7 @@ from __future__ import annotations
 
 # `os` gives us `os.walk`, which visits every folder inside a folder.
 import os
+import re
 
 # `dataclass` writes simple data-holding classes for us (see rules.py).
 from dataclasses import dataclass
@@ -44,8 +45,6 @@ SKIP_FOLDERS = {
     ".venv",         # Python virtual environments
     "venv",
     "__pycache__",   # Python's cached, compiled files
-    "dist",          # build output
-    "build",
 }
 
 # Files bigger than this are skipped. 1,000,000 bytes is about 1 MB.
@@ -59,13 +58,8 @@ MAX_FILE_SIZE = 1_000_000
 # without reading whole files twice.
 BINARY_CHECK_BYTES = 8000
 
-# If a line contains this text, it's skipped. This lets users silence a
-# false alarm on purpose, e.g. a fake key in documentation:
-#
-#     EXAMPLE_KEY = "..."  # secretscan:ignore
-#
-# We only look for the text itself, not a specific comment symbol, so it
-# works in any language: `# ...` in Python, `// ...` in JavaScript, etc.
+# Inline suppression is limited to a trailing comment and one token match.
+# Keeping the marker in one place makes the policy easy to locate.
 IGNORE_MARKER = "secretscan:ignore"
 
 
@@ -96,6 +90,9 @@ class Finding:
     # it". (`str | None` means "either a string or None".)
     placeholder_reason: str | None = None
 
+    # Kept for audit output; only a single candidate on a marked line qualifies.
+    inline_ignored: bool = False
+
 
 def is_too_large(path: Path) -> bool:
     """Return True if the file is bigger than MAX_FILE_SIZE."""
@@ -104,95 +101,86 @@ def is_too_large(path: Path) -> bool:
     return path.stat().st_size > MAX_FILE_SIZE
 
 
+def text_encoding(start: bytes) -> str:
+    """Recognize Unicode byte-order marks before checking for binary bytes."""
+    # Check UTF-32 first: its little-endian marker starts like UTF-16's.
+    if start.startswith((b"\xff\xfe\x00\x00", b"\x00\x00\xfe\xff")):
+        return "utf-32"
+    if start.startswith((b"\xff\xfe", b"\xfe\xff")):
+        return "utf-16"
+    return "utf-8-sig"
+
+
 def is_binary(path: Path) -> bool:
-    """Return True if the file looks like binary data rather than text.
-
-    Binary files (images, PDFs, compiled programs) almost always contain a
-    "null byte": a byte with the value zero. Normal text files basically
-    never do. So if one shows up near the start of the file, it's binary.
-    """
-    # "rb" means "read binary": give us the raw bytes, without trying to
-    # turn them into text (which could fail on a binary file).
-    with open(path, "rb") as file:
+    with path.open("rb") as file:
         start = file.read(BINARY_CHECK_BYTES)
-
-    # b"\0" is a bytes value containing a single null byte.
-    # (The `b` in front means "bytes", not a normal text string.)
-    return b"\0" in start
+    return text_encoding(start) == "utf-8-sig" and b"\0" in start
 
 
-def should_scan(path: Path) -> bool:
-    """Decide whether a single file is worth scanning."""
+@dataclass(frozen=True)
+class ScanIssue:
+    """A skipped path, with a safe reason and whether scanning failed."""
+    path: str
+    reason: str
+    error: bool = False
+
+
+def should_scan(path: Path, issues: list[ScanIssue] | None = None) -> bool:
+    reason = ""
+    failed = False
     try:
-        return not is_too_large(path) and not is_binary(path)
+        if not path.is_file():
+            reason, failed = "not a regular file", True
+        elif is_too_large(path):
+            reason = "over size limit"
+        elif is_binary(path):
+            reason = "binary file"
     except OSError:
-        # OSError is the error Python raises when the operating system
-        # can't do something with a file, e.g. we don't have permission to
-        # read it, or it was deleted a moment ago. We can't scan a file we
-        # can't read, so skip it instead of crashing the whole scan.
-        return False
+        reason, failed = "could not read file", True
+    if reason and issues is not None:
+        issues.append(ScanIssue(str(path), reason, failed))
+    return not reason
 
 
-def find_files(path: Path) -> list[Path]:
-    """Work out which files to scan.
+def find_files(path: Path, issues: list[ScanIssue] | None = None) -> list[Path]:
+    """Find files while recording exclusions and traversal failures."""
+    if issues is None:
+        issues = []
+    if not path.is_dir():
+        return [path] if should_scan(path, issues) else []
 
-    - If `path` is a single file, the answer is just that file.
-    - If `path` is a folder, the answer is every file inside it, including
-      files inside its subfolders, subfolders of those, and so on,
-      except for folders listed in SKIP_FOLDERS.
-
-    Either way, binary files and files over MAX_FILE_SIZE are left out.
-    """
-    # A single file: return it in a list, unless it should be skipped.
-    if path.is_file():
-        if should_scan(path):
-            return [path]
-        return []
+    def walk_error(error: OSError) -> None:
+        issues.append(ScanIssue(str(error.filename), "could not read directory", True))
 
     files = []
-
-    # `os.walk` visits `path` and then every folder inside it, one at a time.
-    # For each folder it visits, it gives us three things:
-    #   folder      - the folder it's currently in, e.g. "src/secretscan"
-    #   subfolders  - the names of the folders directly inside it
-    #   filenames   - the names of the files directly inside it
-    for folder, subfolders, filenames in os.walk(path):
-        # os.walk uses the `subfolders` list to decide where to go next.
-        # So if we change that list, we change where os.walk goes. We
-        # replace its contents with only the folders we want to visit,
-        # sorted alphabetically:
-        #
-        # - `[name for name in subfolders if name not in SKIP_FOLDERS]` is a
-        #   "list comprehension": a one-line way to build a new list by
-        #   filtering another one. It keeps every name NOT in SKIP_FOLDERS.
-        # - `sorted(...)` puts them in alphabetical order, so files are
-        #   always visited (and reported) in the same order every time.
-        # - `subfolders[:] = ...` replaces the contents of the *existing*
-        #   list. This detail matters: writing `subfolders = ...` would
-        #   only create a new list with the same name, and os.walk (which
-        #   still holds the old list) would never see our change.
-        subfolders[:] = sorted(
-            name for name in subfolders if name not in SKIP_FOLDERS
-        )
-
-        # Sort the file names too, for the same reason.
-        for filename in sorted(filenames):
-            # Join the folder and file name into one path,
-            # e.g. "src/secretscan" + "cli.py" -> "src/secretscan/cli.py".
-            # (The `/` operator joins paths when used on Path objects.)
-            file = Path(folder) / filename
-
-            # Only keep real files that are worth scanning.
-            # - `is_file()` skips odd things like "broken shortcuts"
-            #   (symbolic links pointing at a file that's gone).
-            # - `should_scan()` skips binary and very large files.
-            if file.is_file() and should_scan(file):
+    for folder, subfolders, filenames in os.walk(path, onerror=walk_error):
+        kept = []
+        for name in sorted(subfolders):
+            child = Path(folder) / name
+            if name in SKIP_FOLDERS:
+                issues.append(ScanIssue(str(child), "excluded directory"))
+            elif child.is_symlink():
+                # Following links automatically could escape the project or loop.
+                issues.append(ScanIssue(str(child), "symlink directory"))
+            else:
+                kept.append(name)
+        subfolders[:] = kept
+        for name in sorted(filenames):
+            file = Path(folder) / name
+            if should_scan(file, issues):
                 files.append(file)
-
     return files
 
 
-def scan_line(line: str, rules: list[Rule] = RULES) -> list[tuple[Rule, str]]:
+def has_inline_ignore(line: str, matches: list[tuple[Rule, str]]) -> bool:
+    """A trailing marker may dismiss one token, never a whole minified file."""
+    # A header does not identify the private key below it, so it cannot be
+    # safely dismissed by a line marker or a header-based fingerprint.
+    return (len(matches) == 1 and matches[0][0].id != "private-key"
+            and re.search(rf"(?:#|//)\s*{re.escape(IGNORE_MARKER)}\s*$", line) is not None)
+
+
+def scan_line(line: str, rules: list[Rule] = RULES, include_inline: bool = False) -> list[tuple[Rule, str]]:
     """Check one line of text against every rule.
 
     Returns a list of (rule, matched_text) pairs, one for each match.
@@ -200,12 +188,6 @@ def scan_line(line: str, rules: list[Rule] = RULES) -> list[tuple[Rule, str]]:
 
     `rules` defaults to all the real rules, but tests can pass in their own.
     """
-    # The user marked this line as "not a real secret", so report nothing.
-    # Checking here (rather than in scan_file) means every way of scanning
-    # gets this behavior for free, including staged scanning later on.
-    if IGNORE_MARKER in line:
-        return []
-
     matches = []
 
     for rule in rules:
@@ -215,10 +197,12 @@ def scan_line(line: str, rules: list[Rule] = RULES) -> list[tuple[Rule, str]]:
             # `match.group(0)` is the exact text the pattern matched.
             matches.append((rule, match.group(0)))
 
+    if not include_inline and has_inline_ignore(line, matches):
+        return []
     return matches
 
 
-def scan_file(path: Path) -> list[Finding]:
+def scan_file(path: Path, include_inline: bool = False) -> list[Finding]:
     """Read one file and return every possible secret found in it."""
     findings = []
 
@@ -230,11 +214,18 @@ def scan_file(path: Path) -> list[Finding]:
     #   the odd invalid byte, and one bad byte shouldn't stop the scan.
     # The `with` block automatically closes the file when we're done,
     # even if an error happens partway through.
-    with open(path, encoding="utf-8", errors="replace") as file:
+    with path.open("rb") as raw:
+        encoding = text_encoding(raw.read(4))
+    with open(path, encoding=encoding, errors="replace") as file:
         # `enumerate(file, start=1)` gives us each line together with its
         # line number, counting from 1 instead of Python's usual 0.
-        for line_number, line in enumerate(file, start=1):
-            for rule, secret in scan_line(line):
+        lines = file.readlines()
+        for line_number, line in enumerate(lines, start=1):
+            matches = scan_line(line, include_inline=True)
+            inline_ignored = has_inline_ignore(line, matches)
+            if inline_ignored and not include_inline:
+                continue
+            for rule, secret in matches:
                 findings.append(
                     Finding(
                         path=str(path),
@@ -249,7 +240,30 @@ def scan_file(path: Path) -> list[Finding]:
                         # and a real key on the same line are handled
                         # separately.
                         placeholder_reason=placeholder_reason(rule, secret),
+                        inline_ignored=inline_ignored,
                     )
                 )
+
+    # Recognize two adjacent quoted fragments (Python implicit concatenation,
+    # or a +/backslash continuation). Only report matches crossing the join;
+    # complete tokens in either fragment were already handled above.
+    split_literal = re.compile(
+        r"(?P<quote>[\"'])(?P<left>[^\"'\r\n]+)(?P=quote)[ \t]*"
+        r"(?:\+|\\)?[ \t]*\r?\n[ \t]*"
+        r"(?P=quote)(?P<right>[^\"'\r\n]+)(?P=quote)"
+    )
+    for number, (first, second) in enumerate(zip(lines, lines[1:]), start=1):
+        for parts in split_literal.finditer(first + second):
+            left, right = parts.group("left", "right")
+            for rule in RULES:
+                for match in rule.pattern.finditer(left + right):
+                    if match.start() < len(left) < match.end():
+                        secret = match.group(0)
+                        findings.append(Finding(
+                            path=str(path), line_number=number,
+                            rule_name=rule.name, secret=secret,
+                            rule_id=rule.id or rule.name,
+                            placeholder_reason=placeholder_reason(rule, secret),
+                        ))
 
     return findings

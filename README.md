@@ -291,7 +291,9 @@ Some text has the exact *shape* of a key without being one, like an example in d
 secretscan recognizes a **small, deliberately narrow** set of obvious placeholders and hides them by default:
 
 - **Published example values.** Exact example keys that a provider publishes in its own documentation. Currently this is one value: the example access key ID from [AWS's IAM documentation](https://docs.aws.amazon.com/IAM/latest/UserGuide/security-creds-programmatic-access.html) (the one ending in `EXAMPLE`). It must match exactly, including capital letters.
-- **Filler-only keys.** A key whose variable part (everything after its fixed prefix, like `AKIA`) is made **entirely** of one filler character: `X`, `x`, or `0`, at least 16 characters long. Example: `AKIA` followed by sixteen `X`s. This applies only to rules where that variable part is one simple run of characters: **AWS access key IDs, GitHub tokens (`ghp_` etc.), Stripe live keys, and Google API keys.** Keys with several parts (Slack, OpenAI, Anthropic, GitHub fine-grained tokens) and private key headers are never treated as filler.
+- **Filler-only keys.** A key whose variable part (everything after its fixed prefix, like `AKIA`) is made **entirely** of one filler character: `X`, `x`, or `0`, at least 16 characters long. Example: `AKIA` followed by sixteen `X`s. This applies only to rules where that variable part is one simple run of characters: **AWS access key IDs, GitHub tokens (`ghp_` etc.), Stripe live keys, Google API keys, and OpenAI keys.** Other keys with several parts (Slack, Anthropic, GitHub fine-grained tokens) and private key headers are never treated as filler.
+
+- **An exact instructional Slack placeholder:** `xoxb-your-token-goes-here`. Other tokens containing words like "test" are still reported.
 
 That's the whole list. In particular, secretscan does **not** hide a key because:
 
@@ -332,7 +334,9 @@ Added 1 finding to .secretscanignore.
 - **q** stops reviewing. Answers you already gave are saved.
 - **Ctrl-C** cancels the whole review and saves nothing, in case you just answered `y` by mistake.
 
-The secret is masked in the questions too, so open the file at the line shown to see it. `--review` only runs in a terminal: in CI, a git hook, or with piped input, nobody can answer, so it stops with an error instead of waiting forever. It can't be combined with `--no-ignore`, and with `--ignore-file PATH` answers are saved to that file instead.
+The secret is masked in the questions too, so open the file at the line shown to see it. `--review` only runs in a terminal: in CI, a git hook, or with piped input or redirected output, nobody can answer, so it stops with an error instead of waiting forever. It can't be combined with `--no-ignore`, and with `--ignore-file PATH` answers are saved to that file instead.
+
+Before asking questions, review checks that the destination directory is writable. If saving later fails, it attempts to preserve the answers in a temporary recovery file and prints its location. Saves use a unique temporary file that is cleaned up after handled failures or interruptions.
 
 **The manual way.** You can also edit the ignore file yourself:
 
@@ -366,30 +370,30 @@ There's deliberately no "ignore all" option, in `--review` or anywhere else: a f
 
 - The top level is an object with exactly two fields: `"version"` (must be the number `1`) and `"findings"` (a list).
 - Each entry in `"findings"` has exactly two fields: `"id"`, a full 64-character ID in lowercase letters and digits, copied from `--show-ids`; and `"reason"`, a non-empty explanation.
-- The same ID can't be listed twice.
+- The same ID or JSON field cannot be listed twice. UTF-8 files with a byte-order mark (BOM) are accepted.
 
 If the file breaks any of these rules, or isn't valid JSON, secretscan stops with an error and exit code `2`. It never quietly treats a broken ignore file as empty. Error messages say where the problem is, but never print the file's contents.
 
 **Which ignore file is used:**
 
-- By default, `.secretscanignore` in the scanned folder (or, when you scan a single file, the folder that file is in). If there's no such file, the scan runs normally.
+- By default, `.secretscanignore` in the project root. Starting at the scanned directory (or a file's parent), the nearest ancestor containing `.git` or `.secretscanignore` defines that root. Otherwise, the current working directory is used if it contains the target; for external targets, the scanned directory or file's parent is used. Single-file reviews and folder scans within the same project therefore share IDs and decisions.
 - `--ignore-file PATH` uses a different file. If that file doesn't exist, that's an error (exit code `2`).
 - `--no-ignore` uses no ignore file at all. It doesn't turn off placeholder hiding or `secretscan:ignore` comments.
 - The ignore file itself is never scanned for secrets.
 
-**How IDs work, and their limits.** An ID is a *fingerprint*: a SHA-256 hash of the rule that matched, the file's path relative to the scanned folder, and the matched text. That means:
+**How IDs work, and their limits.** An ID is a *fingerprint*: a SHA-256 hash of the rule that matched, the file's path relative to the project root, and the matched text. That means:
 
 - Adding or removing lines above a finding **doesn't** change its ID (the line number isn't included).
 - Changing the key, moving it to another file, or renaming the file **does** change the ID, so the dismissal no longer applies and the finding is reported again.
 - Checking out the project in a different place on disk keeps the same IDs.
-- IDs are relative to the folder you scan. Scanning `secretscan src/` instead of `secretscan .` gives different IDs for the same findings, so always scan from the same place.
+- IDs are relative to the discovered project root. Scanning a file or subfolder in that project keeps the same IDs. Changing project boundaries can change IDs; old dismissals then need review. For a project without Git, run commands from its root or create its `.secretscanignore` there first.
 - If the exact same key appears more than once in one file, every copy has the same ID, and dismissing it dismisses all of them in that file.
-- For **private keys**, only the header line (e.g. `BEGIN RSA PRIVATE KEY`) is matched, not the key itself. So dismissing one private key in a file also dismisses any other private key with the same header in that file.
+- **Private-key headers cannot be dismissed**, either interactively, through an ignore file, or with inline markers. A header does not uniquely identify the key below it, so accepting a dismissal could hide a different key added later.
 - A fingerprint keeps the ignore file free of plain-text keys, but it's **not encryption**: for a short or guessable value, someone could find it by trying candidates until one produces the same hash.
 
 ### 3. Ignore a line with a comment
 
-If you'd rather mark a line in the code itself, add a `secretscan:ignore` comment to it, and secretscan will skip every match on that line:
+If you'd rather mark a line in the code itself, add a `secretscan:ignore` comment to it, at the end of a line containing exactly one token match. Private-key headers and lines with multiple matches remain reportable:
 
 ```python
 EXAMPLE_TOKEN = "this-is-just-documentation"  # secretscan:ignore
@@ -399,15 +403,15 @@ EXAMPLE_TOKEN = "this-is-just-documentation"  # secretscan:ignore
 const demoKey = "not-a-real-key"; // secretscan:ignore
 ```
 
-It works with any comment style, because secretscan just looks for the text `secretscan:ignore` anywhere on the line. These comments always apply, even with `--include-placeholders` and `--no-ignore`.
+Use a trailing `# secretscan:ignore` or `// secretscan:ignore` with no further text. Bare markers elsewhere on a line have no effect. Suppressed matches are counted; `--include-inline-ignored` reports them again. Placeholder and external-ignore filtering still apply independently.
 
 ### Seeing everything that was hidden
 
 ```bash
-secretscan path/to/project --include-placeholders --no-ignore --show-ids
+secretscan path/to/project --include-placeholders --no-ignore --include-inline-ignored --show-ids
 ```
 
-This shows recognized placeholders and dismissed findings alongside everything else, with their IDs. Lines marked with `secretscan:ignore` are still skipped.
+This shows recognized placeholders, external dismissals, and inline dismissals with their IDs. A complete scan of the project's normal scan scope also notes ignore entries that did not match; it never deletes them automatically.
 
 ---
 
@@ -415,24 +419,28 @@ This shows recognized placeholders and dismissed findings alongside everything e
 
 | Secret type | What it looks like (masked) | Notes |
 |---|---|---|
-| **AWS Access Key ID** | `AKIA****************` | Starts with `AKIA`, followed by 16 capital letters and digits |
+| **AWS Access Key ID** | `AKIA****************` | Starts with `AKIA` or `ASIA`, followed by 16 capital letters and digits |
 | **GitHub token** | `ghp_************************************` | Prefixes `ghp_`, `gho_`, `ghu_`, `ghs_`, `ghr_`, followed by 36 letters and digits |
 | **GitHub fine-grained token** | `gith*************************…` | Starts with `github_pat_`, GitHub's newer kind of token |
-| **Slack token** | `xoxb**************************` | Prefixes `xoxb-`, `xoxp-`, `xoxa-`, `xoxr-`, `xoxs-` |
-| **Stripe live secret key** | `sk_l************************` | Only **live** keys (`sk_live_`). Test keys can't move real money |
+| **Slack token** | `xoxb**************************` | Prefixes `xoxb-`, `xoxp-`, `xoxa-`, `xoxr-`, `xoxs-`, plus app tokens beginning `xapp-` |
+| **Stripe live secret key** | `sk_l************************` | Live secret and restricted keys (`sk_live_`, `rk_live_`) |
 | **Google API key** | `AIza***********************************` | Starts with `AIza`, 39 characters total |
-| **OpenAI API key** | `sk-p****************************…` | Starts with `sk-` (including `sk-proj-`), but not `sk-ant-` |
+| **OpenAI API key** | `sk-p****************************…` | Legacy `sk-` plus 48 alphanumeric characters, or `sk-proj-` / `sk-svcacct-` plus a token body |
 | **Anthropic API key** | `sk-a****************************…` | Starts with `sk-ant-` |
-| **Private key** | `----**********************` | Any `-----BEGIN ... PRIVATE KEY-----` header (RSA, EC, DSA, OpenSSH, encrypted, PGP) |
+| **Private key** | `----**********************` | Any `-----BEGIN ... PRIVATE KEY-----` header (RSA, EC, DSA, OpenSSH, encrypted, PGP), or a PuTTY v2/v3 header |
 | **Generic password / secret** *(planned)* | `password = "****"` | Assignments like `password = "..."`, `api_key: "..."`, `secret = '...'`, but **only if the value looks random** (see below) |
 
 ### What it skips
 
 To stay fast and avoid noise, secretscan does **not** scan:
 
-- **Folders** that hold tools, dependencies, or generated files rather than your code: `.git`, `node_modules`, `.venv`, `venv`, `__pycache__`, `dist`, `build`
+- **Folders** that hold tools, dependencies, or generated files rather than your code: `.git`, `node_modules`, `.venv`, `venv`, `__pycache__`
 - **Binary files** such as images, PDFs, and compiled programs
 - **Very large files** (over about 1 MB), which are almost always generated data rather than code a person wrote
+
+Skipped paths and reasons are printed to stderr; the summary does not claim a complete all-clear. Read/traversal failures and a directly requested file that cannot be scanned exit with code `2`. Expected exclusions during a directory scan do not by themselves change the exit code. Symlinked subdirectories are reported and not followed. `dist/` and `build/` are scanned, subject to the same size limit.
+
+BOM-marked UTF-16 and UTF-32 text is decoded and scanned. Unmarked encodings are not guessed. Filenames use ASCII escapes for control and non-ASCII characters so they cannot inject terminal commands or misalign report columns.
 
 Comments, documentation, tests, and example files **are** scanned. See [Handling false alarms](#handling-false-alarms) for why, and for how placeholders are handled.
 
@@ -563,7 +571,8 @@ secretscan is a learning project, and it's honest to say what it *doesn't* do:
 - **It only knows the patterns it was given.** A secret from a service with no rule can slip through. Generic passwords aren't detected yet.
 - **It can't tell a realistic fake key from a real one.** Scanning offline, a well-made fake key looks exactly like a real key. Only a few obvious placeholders are recognized automatically; the rest need a person to review and dismiss them.
 - **Placeholder recognition is a guess.** A real key whose variable part happened to be all `X`s or `0`s would be hidden. `--include-placeholders` shows them.
-- **Finding IDs depend on the scanned folder,** and a private key's ID covers only its header line (see [How IDs work](#2-dismiss-a-reviewed-finding-in-secretscanignore)).
+- **Finding IDs depend on the project root.** Private-key headers are always reportable because they cannot safely identify a particular key for dismissal.
+- **Split-key detection is limited to two adjacent quoted fragments**, optionally joined with `+` or a backslash continuation across the newline. Arbitrary expressions, variables, and tokens spread over more lines are not reconstructed.
 - *(planned)* **The randomness check will be a trade-off.** A truly random-looking non-secret (like a hash) could be flagged, and a weak real password (like `summer2024`) could be missed.
 - **It doesn't scan git history.** It checks your files as they are now, or your staged changes, but not secrets buried in old commits.
 - **Git hooks can be skipped** with `git commit --no-verify`, and each person has to install the hook on their own machine.

@@ -64,8 +64,8 @@ KNOWN_EXAMPLES = {
 #
 # The rules for this check, all of which must be true:
 #   1. The rule defines a "body" group (see rules.py). Only AWS, GitHub
-#      classic tokens, Stripe, and Google keys do. Rules with several parts
-#      (Slack, OpenAI, Anthropic, GitHub fine-grained) and private-key
+#      classic tokens, Stripe, Google, and OpenAI keys do. Other multipart rules
+#      (Slack, Anthropic, GitHub fine-grained) and private-key
 #      headers are never checked, because we don't want to guess where their
 #      variable part starts.
 #   2. The body is at least MIN_FILLER_LENGTH characters long.
@@ -130,6 +130,11 @@ def placeholder_reason(rule: Rule, candidate: str) -> str | None:
     The reason never contains the candidate itself, so it's always safe to
     print.
     """
+    # This exact instructional string is a common Slack placeholder. Do not
+    # generalize this to tokens that merely contain English words.
+    if rule.id == "slack-token" and candidate == "xoxb-your-token-goes-here":
+        return "instructional placeholder"
+
     # Check A: an exact example value published for this rule.
     # `.get(rule.id, set())` returns the rule's examples, or an empty set
     # if the rule has none, so rules without examples never match.

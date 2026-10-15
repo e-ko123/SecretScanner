@@ -99,7 +99,6 @@ def test_rules_without_a_body_never_use_the_filler_check():
     # These rules have several parts, so we don't guess where the body is.
     # Even an all-x value is reported.
     cases = [
-        (OPENAI_API_KEY, "sk-" + "x" * 48),
         (SLACK_TOKEN, "xoxb-" + "x" * 20),
         (GITHUB_FINE_GRAINED_TOKEN, "github_pat_" + "x" * 82),
     ]

@@ -35,6 +35,7 @@ import os
 
 # `re` for checking that an ID looks like a real fingerprint.
 import re
+import tempfile
 
 # `Path` represents a file or folder location (see scanner.py).
 from pathlib import Path
@@ -122,7 +123,7 @@ def fingerprint(rule_id: str, path: str, candidate: str) -> str:
 
     # SHA-256 works on bytes, not text, so encode the string as UTF-8 first.
     # `hexdigest()` gives the hash as 64 hexadecimal characters.
-    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    return hashlib.sha256(canonical.encode("utf-8", errors="surrogatepass")).hexdigest()
 
 
 def finding_id(finding: Finding, root: Path) -> str:
@@ -146,7 +147,7 @@ def load_ignore_file(path: Path) -> dict[str, str]:
     """
     # Read the file as text.
     try:
-        text = path.read_text(encoding="utf-8")
+        text = path.read_text(encoding="utf-8-sig")
     except UnicodeDecodeError:
         raise IgnoreFileError("not valid UTF-8 text")
     except OSError:
@@ -155,7 +156,16 @@ def load_ignore_file(path: Path) -> dict[str, str]:
     # Parse the JSON. If it's broken, say where, but not what's there.
     # `json.JSONDecodeError` knows the line and column of the problem.
     try:
-        data = json.loads(text)
+        # JSON normally keeps the last duplicate field, hiding mistakes.
+        def unique_object(pairs):
+            result = {}
+            for key, value in pairs:
+                if key in result:
+                    raise IgnoreFileError("duplicate JSON field")
+                result[key] = value
+            return result
+
+        data = json.loads(text, object_pairs_hook=unique_object)
     except json.JSONDecodeError as error:
         raise IgnoreFileError(
             f"not valid JSON (problem at line {error.lineno}, column {error.colno})"
@@ -249,6 +259,15 @@ def save_ignore_file(path: Path, ignored: dict[str, str]) -> None:
     # `os.replace` swaps in one step: the ignore file is always either the
     # complete old version or the complete new one, never half-written,
     # even if the program is stopped in the middle of saving.
-    temporary = path.with_name(path.name + ".tmp")
-    temporary.write_text(text, encoding="utf-8")
-    os.replace(temporary, path)
+    # Use a unique name, and remove it even after Ctrl-C or a failed rename.
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8",
+                                         dir=path.parent, prefix=path.name + ".",
+                                         suffix=".tmp", delete=False) as file:
+            temporary = Path(file.name)
+            file.write(text)
+        os.replace(temporary, path)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)

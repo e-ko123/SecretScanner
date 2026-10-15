@@ -141,7 +141,7 @@ def test_ignored_secret_exits_0(tmp_path, capsys):
     file.write_text(f"EXAMPLE = '{FAKE_AWS_KEY}'  # secretscan:ignore\n")
 
     assert main([str(file)]) == 0
-    assert capsys.readouterr().out == "No secrets found.\n"
+    assert "Ignored 1 inline finding" in capsys.readouterr().out
 
 
 def test_summary_is_printed_after_findings(tmp_path, capsys):
@@ -252,7 +252,7 @@ def test_inline_ignore_still_applies_with_include_placeholders(tmp_path, capsys)
     file.write_text(f"KEY = '{PLACEHOLDER_AWS_KEY}'  # secretscan:ignore\n")
 
     assert main([str(file), "--include-placeholders"]) == 0
-    assert capsys.readouterr().out == "No secrets found.\n"
+    assert "Ignored 1 inline finding" in capsys.readouterr().out
 
 
 # --- --show-ids and the .secretscanignore file -----------------------------
@@ -368,7 +368,7 @@ def test_inspect_everything_command(tmp_path, capsys):
     (tmp_path / "config.py").write_text(f"KEY = '{FAKE_AWS_KEY}'\n")
     (tmp_path / "docs.md").write_text(
         f"{PLACEHOLDER_AWS_KEY}\n"
-        f"{OTHER_AWS_KEY}  secretscan:ignore\n"
+        f"{OTHER_AWS_KEY}  # secretscan:ignore\n"
     )
     write_ignore_file(tmp_path / ".secretscanignore", [shown_id(capsys, [str(tmp_path)])])
 
@@ -600,7 +600,8 @@ def test_review_with_nothing_found_asks_nothing(tmp_path, monkeypatch, capsys):
     assert capsys.readouterr().out == "No secrets found.\n"
 
 
-def test_review_refuses_without_a_terminal(tmp_path, capsys):
+def test_review_refuses_without_a_terminal(tmp_path, capsys, monkeypatch):
+    monkeypatch.setattr(cli, "is_interactive", lambda: False)
     # In tests, input isn't a real terminal, just like in CI or a git hook.
     with pytest.raises(SystemExit) as exit_info:
         main([str(tmp_path), "--review"])

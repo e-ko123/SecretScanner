@@ -18,6 +18,8 @@ from __future__ import annotations
 # argparse is Python's built-in tool for reading command-line options
 # (like `--help` or `--version`). It also writes the help text for us.
 import argparse
+import os
+import tempfile
 
 # `sys.stderr` is the "error output" stream, where error messages go.
 import sys
@@ -41,12 +43,34 @@ from secretscan.ignores import (
 
 # `find_files` works out which files to scan; `scan_file` scans one file.
 # `Finding` is the type that holds one result (used in type hints below).
-from secretscan.scanner import Finding, find_files, scan_file
+from secretscan.scanner import Finding, ScanIssue, find_files, scan_file
 
 # How many characters of a secret we show before hiding the rest with `*`.
 # 4 is enough to recognise which key it is (e.g. "AKIA" = AWS), but far too
 # little for anyone to actually use it.
 VISIBLE_CHARS = 4
+
+
+def display(value: object) -> str:
+    """Escape control/non-ASCII characters so paths cannot forge terminal output.
+
+    ASCII escapes also keep column widths predictable without a dependency
+    for measuring emoji, combining characters, or East Asian text.
+    """
+    return ascii(str(value))[1:-1]
+
+
+def scan_root(path: Path) -> Path:
+    """Use one project root for single-file and directory reviews."""
+    directory = (path if path.is_dir() else path.parent).resolve()
+    for parent in (directory, *directory.parents):
+        if (parent / ".git").exists() or (parent / IGNORE_FILE_NAME).exists():
+            return parent
+    # Outside a repository, commands run inside the project share the cwd.
+    cwd = Path.cwd().resolve()
+    if directory == cwd or cwd in directory.parents:
+        return cwd
+    return directory
 
 
 def mask(secret: str) -> str:
@@ -89,7 +113,7 @@ def print_findings(findings: list[Finding], ids: list[str] | None = None) -> Non
     """
     # Build the "file:line" text for every finding first, so we can
     # measure how wide the first column needs to be.
-    locations = [f"{finding.path}:{finding.line_number}" for finding in findings]
+    locations = [f"{display(finding.path)}:{finding.line_number}" for finding in findings]
 
     # The widest entry in each column decides that column's width.
     # `max(...)` here goes through every item and keeps the biggest length.
@@ -174,7 +198,7 @@ def is_interactive() -> bool:
     refuses to run then, instead of waiting forever for an answer.
     (It's a separate function so tests can pretend to be a terminal.)
     """
-    return sys.stdin.isatty()
+    return sys.stdin.isatty() and sys.stdout.isatty()
 
 
 def review_findings(findings: list[Finding], ids: list[str]) -> dict[str, str] | None:
@@ -207,13 +231,16 @@ def review_findings(findings: list[Finding], ids: list[str]) -> dict[str, str] |
         # The same key in the same file shares one ID (see ignores.py), so
         # if the user already said yes to an earlier copy, this one is
         # covered too. Don't ask twice.
+        if finding.rule_id == "private-key":
+            print("Private-key headers cannot be dismissed safely; keeping finding.")
+            continue
         if this_id in dismissed:
             continue
 
         print()
         # Same details as the normal report. The secret is masked here too.
         print(
-            f"[{number}/{total}] {finding.path}:{finding.line_number}   "
+            f"[{number}/{total}] {display(finding.path)}:{finding.line_number}   "
             f"{finding.rule_name}   {mask(finding.secret)}"
         )
 
@@ -259,7 +286,7 @@ def config_error(message: str) -> int:
     """
     # `file=sys.stderr` sends the message to the error output, like
     # argparse does with its own errors.
-    print(f"secretscan: error: {message}", file=sys.stderr)
+    print(f"secretscan: error: {display(message)}", file=sys.stderr)
     return 2
 
 
@@ -297,6 +324,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="also report recognized placeholder keys (like an all-X key) "
         "instead of hiding them",
+    )
+
+    parser.add_argument(
+        "--include-inline-ignored", action="store_true",
+        help="also report candidates suppressed by trailing inline markers",
     )
 
     # Show each finding's full ID, so it can be copied into the ignore file.
@@ -347,7 +379,7 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main(argv: list[str] | None = None) -> int:
+def run(argv: list[str] | None = None) -> int:
     """Entry point for the `secretscan` command.
 
     `argv` is the list of options the user typed, for example ["config.py"].
@@ -374,7 +406,7 @@ def main(argv: list[str] | None = None) -> int:
     # Code 2 is the standard argparse code for "you used the command wrong",
     # which keeps it separate from 1 ("secrets found").
     if not path.exists():
-        parser.error(f"path not found: {path}")
+        parser.error(f"path not found: {display(path)}")
 
     # --review saves answers to the ignore file, so it can't be combined with
     # "use no ignore file". And it asks questions, so a person must be there
@@ -384,15 +416,11 @@ def main(argv: list[str] | None = None) -> int:
                      "(there'd be no ignore file to save your answers to)")
     if args.review and not is_interactive():
         parser.error("--review needs a terminal to ask questions in; "
-                     "it can't run in CI, a git hook, or with piped input")
+                     "it can't run with piped input or redirected output")
 
-    # The "scan root" is the folder that finding IDs are relative to, and
-    # where we look for the ignore file. When scanning a folder, it's that
-    # folder; when scanning one file, it's the folder the file is in.
-    if path.is_dir():
-        root = path
-    else:
-        root = path.parent
+    # Use the same project root for file and folder scans so review answers
+    # remain effective when the next invocation scans a different scope.
+    root = scan_root(path)
 
     # Work out which ignore file to use, if any.
     # `Path | None` in a type hint means "a Path, or None".
@@ -402,13 +430,15 @@ def main(argv: list[str] | None = None) -> int:
     elif args.ignore_file is not None:
         # The user named a file, so it must exist.
         ignore_path = Path(args.ignore_file)
-        if not ignore_path.is_file():
+        if not ignore_path.exists():
             return config_error(f"ignore file not found: {ignore_path}")
+        if not ignore_path.is_file():
+            return config_error(f"ignore path is not a regular file: {ignore_path}")
     else:
         # Otherwise use .secretscanignore in the scan root, if it's there.
         # A missing default ignore file is normal: most projects won't have one.
         default = root / IGNORE_FILE_NAME
-        if default.is_file():
+        if default.exists():
             ignore_path = default
         else:
             ignore_path = None
@@ -429,13 +459,23 @@ def main(argv: list[str] | None = None) -> int:
     # into one list. `extend` adds all items from one list onto the end of
     # another (unlike `append`, which would add the whole list as one item).
     candidates = []
-    for file in find_files(path):
+    issues: list[ScanIssue] = []
+    for file in find_files(path, issues):
         # Don't scan the ignore file itself: it's settings, not code.
         # `resolve()` turns both into full, absolute paths, so the same
         # file written two different ways still compares as equal.
         if ignore_path is not None and file.resolve() == ignore_path.resolve():
             continue
-        candidates.extend(scan_file(file))
+        try:
+            candidates.extend(scan_file(file, include_inline=True))
+        except (OSError, UnicodeError):
+            issues.append(ScanIssue(str(file), "could not read file", True))
+
+    # Retain suppressed candidates for counts and an explicit audit option.
+    inline_count = sum(c.inline_ignored for c in candidates) if not args.include_inline_ignored else 0
+    all_ids = {finding_id(c, root) for c in candidates}
+    if not args.include_inline_ignored:
+        candidates = [c for c in candidates if not c.inline_ignored]
 
     # Stage 2: set aside recognized placeholders, unless the user asked to
     # see them. The scanner has already marked each candidate with a
@@ -456,7 +496,7 @@ def main(argv: list[str] | None = None) -> int:
     ignored_count = 0
     for finding in findings:
         this_id = finding_id(finding, root)
-        if this_id in ignored_ids:
+        if this_id in ignored_ids and finding.rule_id != "private-key":
             ignored_count += 1
         else:
             reportable.append(finding)
@@ -466,6 +506,14 @@ def main(argv: list[str] | None = None) -> int:
     # the "ignore it" answers, and treat those findings as ignored from here
     # on, exactly as if they'd been in the ignore file all along.
     if args.review and reportable:
+        # Check the destination before collecting answers. Atomic saves need
+        # a writable parent directory even when the file already exists.
+        destination = ignore_path or root / IGNORE_FILE_NAME
+        try:
+            with tempfile.TemporaryFile(dir=destination.parent):
+                pass
+        except OSError:
+            return config_error("review destination is not writable; use --ignore-file")
         dismissed = review_findings(reportable, reportable_ids)
         print()
 
@@ -480,8 +528,15 @@ def main(argv: list[str] | None = None) -> int:
                 ignore_path = root / IGNORE_FILE_NAME
             # `update` adds the new entries to the existing ones.
             ignored_ids.update(dismissed)
-            save_ignore_file(ignore_path, ignored_ids)
-            print(f"Added {plural(len(dismissed), 'finding')} to {ignore_path}.")
+            try:
+                save_ignore_file(ignore_path, ignored_ids)
+            except OSError:
+                # Permissions can change after the preflight. Keep the answers
+                # in a private temporary directory instead of losing the review.
+                recovery = Path(tempfile.mkdtemp(prefix="secretscan-review-")) / IGNORE_FILE_NAME
+                save_ignore_file(recovery, ignored_ids)
+                return config_error(f"could not save review; answers preserved in {recovery}")
+            print(f"Added {plural(len(dismissed), 'finding')} to {display(ignore_path)}.")
             print()
 
             # Rebuild the reportable lists without the dismissed findings.
@@ -508,7 +563,7 @@ def main(argv: list[str] | None = None) -> int:
 
     # Stage 6: always finish with a summary, so the user knows the scan
     # really ran, even when nothing was found.
-    anything_hidden = bool(placeholders) or ignored_count > 0
+    anything_hidden = bool(placeholders) or ignored_count > 0 or inline_count > 0 or bool(issues)
     print(summary(reportable, anything_hidden=anything_hidden))
 
     # If anything was hidden, say how much, and how to see it. Hiding
@@ -520,9 +575,26 @@ def main(argv: list[str] | None = None) -> int:
         )
     if ignored_count:
         print(
-            f"Ignored {plural(ignored_count, 'finding')} listed in {ignore_path} "
+            f"Ignored {plural(ignored_count, 'finding')} listed in {display(ignore_path)} "
             "(use --no-ignore to see)."
         )
+
+    if inline_count:
+        print(f"Ignored {plural(inline_count, 'inline finding')} "
+              "(use --include-inline-ignored to see).")
+    if issues:
+        print(f"Skipped {len(issues)} paths; scan coverage is incomplete.", file=sys.stderr)
+        for issue in issues:
+            print(f"  {display(issue.path)}: {issue.reason}", file=sys.stderr)
+    # Only a complete scan of the project root can identify stale entries.
+    if (path.is_dir() and path.resolve() == root
+            and all(issue.reason == "excluded directory" for issue in issues)):
+        unused = set(ignored_ids) - all_ids
+        if unused:
+            print(f"Notice: {len(unused)} ignore entries did not match this scan "
+                  "(review before removing).", file=sys.stderr)
+    if any(issue.error for issue in issues) or (issues and not path.is_dir()):
+        return 2
 
     # An empty list counts as False in Python, so this reads as:
     # "if anything is left to report, exit with 1; otherwise exit with 0".
@@ -530,3 +602,25 @@ def main(argv: list[str] | None = None) -> int:
     if reportable:
         return 1
     return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Keep runtime failures distinct from findings, without exposing secrets."""
+    try:
+        result = run(argv)
+        # Flush here so a closed pipe is caught before interpreter shutdown.
+        sys.stdout.flush()
+        return result
+    except BrokenPipeError:
+        # Redirect the descriptor so shutdown does not retry the broken pipe.
+        try:
+            with open(os.devnull, "w") as sink:
+                os.dup2(sink.fileno(), sys.stdout.fileno())
+        except (OSError, ValueError):
+            pass
+        return 2
+    except KeyboardInterrupt:
+        return config_error("scan interrupted")
+    except Exception as error:
+        # Exception messages can contain source content; print only the type.
+        return config_error(f"scan failed ({type(error).__name__})")
