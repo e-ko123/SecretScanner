@@ -71,15 +71,19 @@ class Rule:
 #   [0-9A-Z]    any one character that is a digit or a CAPITAL letter...
 #   {16}        ...repeated exactly 16 times.
 #   )           end of the body group.
-#   \b          a word boundary: the key must end here, so a longer
-#               string like AKIA + 20 characters doesn't match.
+#   (?![0-9A-Z])  a "negative lookahead" (see the OpenAI rule): the next
+#               character must NOT be another digit or capital letter, so a
+#               longer string like AKIA + 20 characters doesn't match.
+#               We deliberately don't use \b here: Python's \b also treats
+#               "_" and letters like "中" as part of a word, so a key followed
+#               by "_backup" or a Chinese character would be missed.
 #
 # The r"..." in front of the string means "raw string": Python leaves the
 # backslashes alone, so \b reaches the regex engine as-is. Without the r,
 # Python would turn \b into a "backspace" character and the pattern would break.
 AWS_ACCESS_KEY_ID = Rule(
     name="AWS Access Key ID",
-    pattern=re.compile(r"(?:AKIA|ASIA)(?P<body>[0-9A-Z]{16})\b"),
+    pattern=re.compile(r"(?:AKIA|ASIA)(?P<body>[0-9A-Z]{16})(?![0-9A-Z])"),
     id="aws-access-key-id",
 )
 
@@ -95,19 +99,52 @@ AWS_ACCESS_KEY_ID = Rule(
 #   ghs = server-to-server token
 #   ghr = refresh token
 #
+# Refresh tokens (ghr_) are longer: GitHub's own revocation example has
+# 76 characters after the prefix.
+# https://docs.github.com/en/rest/credentials/revoke
+#
 # The pattern, piece by piece:
-#   (ghp|gho|ghu|ghs|ghr)  ONE of these five prefixes. The | means "or",
-#                          and the brackets group the choices together.
-#   _                      a literal underscore.
-#   (?P<body>...)          the "body" group (see the AWS rule): the 36
-#                          characters after the prefix.
-#   [0-9a-zA-Z]            one digit, lowercase letter, or capital letter...
-#   {36}                   ...repeated exactly 36 times.
-#   \b                     word boundary: the token must end here.
+#   gh[pous]_            ghp_, gho_, ghu_, or ghs_ (an old-style ghs_ token;
+#                        the new long ghs_ format has its own rule below)...
+#   (?=[0-9a-zA-Z]{36}   ...then a "lookahead" checks, WITHOUT using up any
+#   (?![0-9a-zA-Z]))     text, that exactly 36 letters/digits follow and
+#                        that a 37th letter/digit does not.
+#   |ghr_(?=[0-9a-zA-Z]{36,})  OR ghr_ followed by 36 or more.
+#   (?P<body>[0-9a-zA-Z]+)     then the body itself: the run of letters and
+#                        digits that the lookahead just checked.
+# Checking the length in a lookahead lets both kinds share ONE body group
+# (Python doesn't allow two groups with the same name).
 GITHUB_TOKEN = Rule(
     name="GitHub Token",
-    pattern=re.compile(r"(ghp|gho|ghu|ghs|ghr)_(?P<body>[0-9a-zA-Z]{36})\b"),
+    pattern=re.compile(
+        r"(?:gh[pous]_(?=[0-9a-zA-Z]{36}(?![0-9a-zA-Z]))|ghr_(?=[0-9a-zA-Z]{36,}))"
+        r"(?P<body>[0-9a-zA-Z]+)"
+    ),
     id="github-token",
+)
+
+
+# ---------------------------------------------------------------------------
+# GitHub App installation token (stateless format)
+# https://github.blog/changelog/2026-10-02-stateless-github-app-installation-tokens-rolled-out/
+# ---------------------------------------------------------------------------
+# Since October 2026 GitHub issues installation tokens shaped like
+# ghs_<APP ID>_<JWT>, about 520 characters long. A JWT ("JSON Web Token") is
+# three parts made of letters, digits, "_" and "-", joined by dots.
+#
+# The pattern, piece by piece:
+#   ghs_                 the prefix.
+#   [0-9]+_              the app's numeric ID, then an underscore.
+#   [A-Za-z0-9_-]{10,}   the first JWT part (10 or more characters)...
+#   \.                   ...a literal dot (a plain . would mean "any character")...
+#   (repeated)           ...and the second and third parts the same way.
+# No body group: the token has several parts, so placeholder checks don't apply.
+GITHUB_APP_INSTALLATION_TOKEN = Rule(
+    name="GitHub App Installation Token",
+    pattern=re.compile(
+        r"ghs_[0-9]+_[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}"
+    ),
+    id="github-app-installation-token",
 )
 
 
@@ -122,31 +159,37 @@ GITHUB_TOKEN = Rule(
 #   github_pat_     the exact text "github_pat_".
 #   [0-9a-zA-Z_]    one letter, digit, or underscore...
 #   {82}            ...repeated exactly 82 times.
-#   \b              word boundary: the token must end here.
+#   (?![0-9a-zA-Z_])  the next character must not be another token character
+#                   (see the AWS rule for why this isn't \b).
 #
 # No body group: the part after the prefix is made of two pieces joined by
 # an underscore, so "the body" isn't one simple run of characters. We don't
 # guess, so placeholder checks don't apply to this rule.
 GITHUB_FINE_GRAINED_TOKEN = Rule(
     name="GitHub Fine-Grained Token",
-    pattern=re.compile(r"github_pat_[0-9a-zA-Z_]{82}\b"),
+    pattern=re.compile(r"github_pat_[0-9a-zA-Z_]{82}(?![0-9a-zA-Z_])"),
     id="github-fine-grained-token",
 )
 
 
 # ---------------------------------------------------------------------------
 # Slack token
-# App-level xapp- tokens: https://docs.slack.dev/authentication/tokens/
+# Token catalog (xoxb-, xoxp-, xapp-, xwfp-): https://docs.slack.dev/authentication/tokens/
+# Rotating tokens (xoxe- refresh tokens, and access tokens that start with
+# "xoxe." like xoxe.xoxb-1-...): https://docs.slack.dev/authentication/using-token-rotation/
 # ---------------------------------------------------------------------------
 # Real example shape: xoxb-<numbers>-<numbers>-<letters and digits>
 # (the length varies).
 # The letter after "xox" tells you what kind of token it is:
-#   b = bot token, p = user token, a / r / s = other kinds of Slack tokens.
+#   b = bot token, p = user token, e = refresh token,
+#   a / r / s = other kinds of Slack tokens. xwfp- is a workflow token.
 #
 # The pattern, piece by piece:
-#   xox            the exact letters "xox". Every Slack token starts this way.
-#   [abprs]        ONE of the letters a, b, p, r, or s. A list of letters in
-#                  square brackets means "any one of these".
+#   (?:xoxe\.)?    an optional "xoxe." in front, which rotated tokens have.
+#                  (? after a group means "zero or one time": optional.)
+#   (?:xox[abeprs]|xwfp)  "xox" plus ONE of the letters a, b, e, p, r, s
+#                  (a list of letters in square brackets means "any one of
+#                  these"), OR "xwfp".
 #   -              a literal dash.
 #   [0-9A-Za-z-]   one digit, letter, or dash. (A dash at the END of the
 #                  square brackets means a real "-" character, not a range
@@ -159,7 +202,10 @@ GITHUB_FINE_GRAINED_TOKEN = Rule(
 # isn't one simple body to check for placeholders.
 SLACK_TOKEN = Rule(
     name="Slack Token",
-    pattern=re.compile(r"(?:xox[abprs]-[0-9A-Za-z-]{10,}|xapp-[0-9]+-[0-9A-Za-z]+-[0-9]+-[0-9A-Za-z]+)"),
+    pattern=re.compile(
+        r"(?:xoxe\.)?(?:(?:xox[abeprs]|xwfp)-[0-9A-Za-z-]{10,}"
+        r"|xapp-[0-9]+-[0-9A-Za-z]+-[0-9]+-[0-9A-Za-z]+)"
+    ),
     id="slack-token",
 )
 
@@ -242,16 +288,28 @@ ANTHROPIC_API_KEY = Rule(
 #   sk-<48 letters and digits>                       (older keys)
 #   sk-proj-<long run of letters, digits, _ and ->   (newer project keys)
 #
-# The first lookahead checks body length without consuming it. This lets
-# both alternatives share the named body group for placeholder detection:
-# - proj-/svcacct- prefixes allow 32+ letters, digits, dashes, underscores.
-# - legacy keys require exactly 48 letters/digits, followed by a delimiter.
-# Ordinary hyphenated words and sk-ant- tokens fit neither alternative.
+# The pattern, piece by piece:
+#   sk-                    the exact text "sk-".
+#   (?:proj-|svcacct-)?    an optional "proj-" or "svcacct-" part.
+#   (?P<body>              the body group, which is ONE of three choices:
+#     (?<=proj-)[...]{32,}     after "proj-": 32+ letters, digits, "_", "-".
+#     |(?<=svcacct-)[...]{32,} after "svcacct-": the same.
+#     |(?<=sk-)[0-9A-Za-z]{48}(?![0-9A-Za-z])
+#                          straight after "sk-": exactly 48 letters/digits
+#                          (an older key), not followed by a 49th.
+#   )
+# `(?<=...)` is a "lookbehind": it checks the text just BEFORE this point
+# without using it up. Each choice only applies after the right prefix, so
+# all three can share one body group for placeholder detection.
+# The older keys never contain "-", so a key followed by "-suffix" still
+# matches, while "sk-ant-..." (Anthropic) and ordinary hyphenated words like
+# "sk-hynix-..." fit none of the choices.
 OPENAI_API_KEY = Rule(
     name="OpenAI API Key",
     pattern=re.compile(
-        r"sk-(?:(?:proj|svcacct)-(?=[0-9A-Za-z_-]{32,}(?![0-9A-Za-z_-]))"
-        r"|(?=[0-9A-Za-z]{48}(?![0-9A-Za-z_-])))(?P<body>[0-9A-Za-z_-]+)"
+        r"sk-(?:proj-|svcacct-)?(?P<body>(?<=proj-)[0-9A-Za-z_-]{32,}"
+        r"|(?<=svcacct-)[0-9A-Za-z_-]{32,}"
+        r"|(?<=sk-)[0-9A-Za-z]{48}(?![0-9A-Za-z]))"
     ),
     id="openai-api-key",
 )
@@ -300,6 +358,7 @@ PRIVATE_KEY = Rule(
 RULES = [
     AWS_ACCESS_KEY_ID,
     GITHUB_TOKEN,
+    GITHUB_APP_INSTALLATION_TOKEN,
     GITHUB_FINE_GRAINED_TOKEN,
     SLACK_TOKEN,
     STRIPE_LIVE_SECRET_KEY,

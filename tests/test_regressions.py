@@ -301,3 +301,52 @@ def test_closed_pipe_exits_2_without_shutdown_traceback(tmp_path):
         os.close(write_fd)
     assert result.returncode == 2
     assert "Traceback" not in result.stderr
+
+
+# --- second audit: rule formats and token endings ----------------------------
+# GitHub, Slack and OpenAI shapes below follow the providers' own docs (linked
+# in rules.py). Every value is synthetic and built in pieces.
+
+GHP = "ghp_" + "Ab12Cd" * 6
+FINE_GRAINED = "github_pat_" + "Ab12" * 20 + "Z9"
+OPENAI_LEGACY = "sk-" + "Ab12Cd34" * 6
+
+
+@pytest.mark.parametrize("token, suffix", [
+    (AWS, "_backup"), (AWS, "中"),
+    (GHP, "_backup"), (GHP, "中"),
+    # "_" is a legal character inside fine-grained tokens, so only the
+    # non-ASCII suffix is outside that token's alphabet.
+    (FINE_GRAINED, "中"),
+])
+def test_token_followed_by_underscore_or_non_ascii_is_found(token, suffix):
+    # Python's \b counts "_" and letters like "中" as word characters, so a
+    # \b at the end of a rule used to hide these keys.
+    assert [value for _, value in scanner.scan_line(token + suffix)] == [token]
+
+
+def test_legacy_openai_key_followed_by_hyphen_is_found():
+    # Older OpenAI keys never contain "-", so "-suffix" isn't part of the key.
+    assert [value for _, value in scanner.scan_line(OPENAI_LEGACY + "-suffix")] == [OPENAI_LEGACY]
+
+
+@pytest.mark.parametrize("token", [
+    # GitHub refresh token with a 76-character body, like GitHub's own example.
+    "ghr_" + "1B4a2e77838347a7" * 4 + "Ab12Cd3456Ef",
+    # GitHub's stateless installation token: ghs_<app id>_<JWT>.
+    "ghs_123456_" + "eyJhbGciOiJSUzI1NiJ9" + "." + "eyJpc3MiOiIxMjM0NTYifQ" * 10 + "." + "Ab1-_Cd2" * 20,
+    # Slack refresh, rotated, workflow, and rotated app-level tokens.
+    "xoxe-1-" + "Ab12Cd34Ef" * 3,
+    "xoxe.xoxp-1-" + "1234-Ab12Cd34Ef",
+    "xwfp-" + "Ab12Cd34Ef" * 2,
+    "xoxe.xapp-1-" + "A123BC-123456-Ab12Cd34",
+])
+def test_current_provider_formats_are_found(token):
+    assert [value for _, value in scanner.scan_line(token)] == [token]
+
+
+def test_slack_rotation_doc_placeholder_is_recognized(tmp_path, capsys):
+    path = tmp_path / "docs.md"
+    path.write_text("REFRESH=" + "xoxe-1-" + "Your-Refresh-Token" + "\n")
+    assert cli.main([str(path)]) == 0
+    assert "Suppressed 1 recognized placeholder" in capsys.readouterr().out

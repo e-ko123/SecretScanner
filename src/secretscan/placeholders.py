@@ -87,6 +87,14 @@ FILLER_CHARACTERS = {"X", "x", "0"}
 MIN_FILLER_LENGTH = 16
 
 
+# Exact Slack placeholder strings (see placeholder_reason). Built in pieces
+# so this file never contains a complete token-shaped string.
+SLACK_INSTRUCTIONAL_PLACEHOLDERS = {
+    "xoxb-" + "your-token-goes-here",
+    "xoxe-1-" + "Your-Refresh-Token",
+}
+
+
 def token_body(rule: Rule, candidate: str) -> str | None:
     """Return the variable part ("body") of a matched token, if the rule has one.
 
@@ -130,9 +138,11 @@ def placeholder_reason(rule: Rule, candidate: str) -> str | None:
     The reason never contains the candidate itself, so it's always safe to
     print.
     """
-    # This exact instructional string is a common Slack placeholder. Do not
-    # generalize this to tokens that merely contain English words.
-    if rule.id == "slack-token" and candidate == "xoxb-your-token-goes-here":
+    # These exact instructional strings are common Slack placeholders. The
+    # second is from Slack's own token-rotation guide:
+    # https://docs.slack.dev/authentication/using-token-rotation/
+    # Do not generalize this to tokens that merely contain English words.
+    if rule.id == "slack-token" and candidate in SLACK_INSTRUCTIONAL_PLACEHOLDERS:
         return "instructional placeholder"
 
     # Check A: an exact example value published for this rule.
