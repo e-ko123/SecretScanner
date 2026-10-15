@@ -4,7 +4,15 @@ Fake keys are built in code so no complete key appears in this file
 (see test_rules.py for why).
 """
 
-from secretscan.scanner import SKIP_FOLDERS, find_files, scan_file, scan_line
+from secretscan.scanner import (
+    MAX_FILE_SIZE,
+    SKIP_FOLDERS,
+    find_files,
+    is_binary,
+    is_too_large,
+    scan_file,
+    scan_line,
+)
 
 FAKE_AWS_KEY = "AKIA" + "X" * 16
 
@@ -75,6 +83,52 @@ def test_find_files_does_not_skip_folders_with_similar_names(tmp_path):
     (tmp_path / "builder" / "tool.py").write_text("x = 1\n")
 
     assert find_files(tmp_path) == [tmp_path / "builder" / "tool.py"]
+
+
+# --- skipping binary and large files ---------------------------------------
+
+def test_is_binary_true_for_file_with_null_bytes(tmp_path):
+    # The first bytes of a real PNG image, which include null bytes (\x00).
+    # `write_bytes` writes raw bytes instead of text.
+    file = tmp_path / "image.png"
+    file.write_bytes(b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR")
+
+    assert is_binary(file) is True
+
+
+def test_is_binary_false_for_text_including_emoji(tmp_path):
+    # Non-English characters and emoji are still text, not binary.
+    file = tmp_path / "notes.txt"
+    file.write_text("héllo wörld 🎉\n", encoding="utf-8")
+
+    assert is_binary(file) is False
+
+
+def test_is_too_large_only_above_the_limit(tmp_path):
+    # Exactly at the limit is fine; one byte over is too large.
+    at_limit = tmp_path / "at_limit.txt"
+    at_limit.write_text("a" * MAX_FILE_SIZE)
+    over_limit = tmp_path / "over_limit.txt"
+    over_limit.write_text("a" * (MAX_FILE_SIZE + 1))
+
+    assert is_too_large(at_limit) is False
+    assert is_too_large(over_limit) is True
+
+
+def test_find_files_skips_binary_and_large_files(tmp_path):
+    (tmp_path / "image.png").write_bytes(b"\x89PNG\x00\x00")
+    (tmp_path / "huge.log").write_text("a" * (MAX_FILE_SIZE + 1))
+    (tmp_path / "app.py").write_text("x = 1\n")
+
+    assert find_files(tmp_path) == [tmp_path / "app.py"]
+
+
+def test_find_files_skips_a_single_binary_file(tmp_path):
+    # Even when the user names a binary file directly, we don't scan it.
+    file = tmp_path / "image.png"
+    file.write_bytes(b"\x89PNG\x00\x00")
+
+    assert find_files(file) == []
 
 
 # --- scan_line -------------------------------------------------------------

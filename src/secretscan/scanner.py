@@ -40,6 +40,17 @@ SKIP_FOLDERS = {
     "build",
 }
 
+# Files bigger than this are skipped. 1,000,000 bytes is about 1 MB.
+# Files that large are almost always generated data (logs, data dumps,
+# bundled code), not something a person typed a password into.
+# (The underscores in 1_000_000 are just for readability; Python ignores them.)
+MAX_FILE_SIZE = 1_000_000
+
+# How many bytes from the start of a file we look at to decide whether it's
+# binary. 8,000 is the same amount git checks. It's enough to be accurate
+# without reading whole files twice.
+BINARY_CHECK_BYTES = 8000
+
 
 @dataclass(frozen=True)
 class Finding:
@@ -59,6 +70,42 @@ class Finding:
     secret: str
 
 
+def is_too_large(path: Path) -> bool:
+    """Return True if the file is bigger than MAX_FILE_SIZE."""
+    # `stat()` asks the operating system for facts about the file without
+    # opening it. `st_size` is its size in bytes.
+    return path.stat().st_size > MAX_FILE_SIZE
+
+
+def is_binary(path: Path) -> bool:
+    """Return True if the file looks like binary data rather than text.
+
+    Binary files (images, PDFs, compiled programs) almost always contain a
+    "null byte": a byte with the value zero. Normal text files basically
+    never do. So if one shows up near the start of the file, it's binary.
+    """
+    # "rb" means "read binary": give us the raw bytes, without trying to
+    # turn them into text (which could fail on a binary file).
+    with open(path, "rb") as file:
+        start = file.read(BINARY_CHECK_BYTES)
+
+    # b"\0" is a bytes value containing a single null byte.
+    # (The `b` in front means "bytes", not a normal text string.)
+    return b"\0" in start
+
+
+def should_scan(path: Path) -> bool:
+    """Decide whether a single file is worth scanning."""
+    try:
+        return not is_too_large(path) and not is_binary(path)
+    except OSError:
+        # OSError is the error Python raises when the operating system
+        # can't do something with a file, e.g. we don't have permission to
+        # read it, or it was deleted a moment ago. We can't scan a file we
+        # can't read, so skip it instead of crashing the whole scan.
+        return False
+
+
 def find_files(path: Path) -> list[Path]:
     """Work out which files to scan.
 
@@ -66,10 +113,14 @@ def find_files(path: Path) -> list[Path]:
     - If `path` is a folder, the answer is every file inside it, including
       files inside its subfolders, subfolders of those, and so on,
       except for folders listed in SKIP_FOLDERS.
+
+    Either way, binary files and files over MAX_FILE_SIZE are left out.
     """
-    # A single file: nothing to search for, just return it in a list.
+    # A single file: return it in a list, unless it should be skipped.
     if path.is_file():
-        return [path]
+        if should_scan(path):
+            return [path]
+        return []
 
     files = []
 
@@ -104,9 +155,11 @@ def find_files(path: Path) -> list[Path]:
             # (The `/` operator joins paths when used on Path objects.)
             file = Path(folder) / filename
 
-            # Only keep real files. This skips odd things like "broken
-            # shortcuts" (symbolic links pointing at a file that's gone).
-            if file.is_file():
+            # Only keep real files that are worth scanning.
+            # - `is_file()` skips odd things like "broken shortcuts"
+            #   (symbolic links pointing at a file that's gone).
+            # - `should_scan()` skips binary and very large files.
+            if file.is_file() and should_scan(file):
                 files.append(file)
 
     return files
@@ -139,8 +192,9 @@ def scan_file(path: Path) -> list[Finding]:
     # Open the file for reading as text.
     # - encoding="utf-8": the most common text encoding for code.
     # - errors="replace": if some bytes aren't valid text, replace them with
-    #   a placeholder character instead of crashing. (Skipping binary files
-    #   properly comes in a later step.)
+    #   a placeholder character instead of crashing. Binary files are
+    #   already filtered out by find_files, but a text file can still have
+    #   the odd invalid byte, and one bad byte shouldn't stop the scan.
     # The `with` block automatically closes the file when we're done,
     # even if an error happens partway through.
     with open(path, encoding="utf-8", errors="replace") as file:
