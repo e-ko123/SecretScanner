@@ -14,7 +14,10 @@ from secretscan.scanner import (
     scan_line,
 )
 
-FAKE_AWS_KEY = "AKIA" + "X" * 16
+# A fake AWS key in the right shape: "AKIA" + 16 varied capital letters and
+# digits. It's deliberately NOT "AKIA" + "X" * 16: an all-X key is a
+# recognized placeholder, and these tests need a key that looks real.
+FAKE_AWS_KEY = "AKIA" + "Z3K9P2M7W4Q8T6N5"
 
 
 # --- find_files ------------------------------------------------------------
