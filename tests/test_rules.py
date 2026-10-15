@@ -11,6 +11,7 @@ from secretscan.rules import (
     GITHUB_FINE_GRAINED_TOKEN,
     GITHUB_TOKEN,
     GOOGLE_API_KEY,
+    OPENAI_API_KEY,
     SLACK_TOKEN,
     STRIPE_LIVE_SECRET_KEY,
 )
@@ -211,3 +212,27 @@ def test_anthropic_rule_matches_a_key():
 def test_anthropic_rule_ignores_short_placeholder():
     # Documentation often shows a short placeholder like this.
     assert ANTHROPIC_API_KEY.pattern.search("sk-ant-xxxx") is None
+
+
+# --- OpenAI ----------------------------------------------------------------
+
+def test_openai_rule_matches_an_older_key():
+    key = "sk-" + "a" * 48
+    match = OPENAI_API_KEY.pattern.search(f'OPENAI_API_KEY="{key}"')
+    assert match is not None
+    assert match.group(0) == key
+
+
+def test_openai_rule_matches_a_project_key():
+    key = "sk-" + "proj-" + "a" * 100
+    assert OPENAI_API_KEY.pattern.search(key).group(0) == key
+
+
+def test_openai_rule_ignores_short_placeholder():
+    assert OPENAI_API_KEY.pattern.search("sk-xxxx") is None
+
+
+def test_openai_rule_does_not_match_anthropic_keys():
+    # The negative lookahead (?!ant-) stops the OpenAI rule from also
+    # reporting Anthropic keys, which would show every one twice.
+    assert OPENAI_API_KEY.pattern.search(FAKE_ANTHROPIC_KEY) is None

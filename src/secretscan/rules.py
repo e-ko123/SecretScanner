@@ -193,6 +193,35 @@ ANTHROPIC_API_KEY = Rule(
 )
 
 
+# ---------------------------------------------------------------------------
+# OpenAI API key
+# ---------------------------------------------------------------------------
+# Real example shapes:
+#   sk-<48 letters and digits>                       (older keys)
+#   sk-proj-<long run of letters, digits, _ and ->   (newer project keys)
+#
+# The tricky part: Anthropic keys ALSO start with "sk-" (they start with
+# "sk-ant-"). A plain "sk-..." pattern would match Anthropic keys too, and
+# every Anthropic key would be reported twice. So this pattern says
+# "sk-, but NOT followed by ant-".
+#
+# The pattern, piece by piece:
+#   \b              word boundary: nothing glued on the left.
+#   sk-             the exact text "sk-".
+#   (?!ant-)        a "negative lookahead": it checks that the next
+#                   characters are NOT "ant-", without using them up.
+#                   Think of it as peeking ahead: "if the next thing is
+#                   'ant-', give up on this match". If the next thing is
+#                   anything else, carry on from the same spot.
+#   [0-9A-Za-z_-]   one digit, letter, underscore, or dash...
+#   {32,}           ...repeated 32 OR MORE times, to skip short placeholder
+#                   text like "sk-xxxx" in documentation.
+OPENAI_API_KEY = Rule(
+    name="OpenAI API Key",
+    pattern=re.compile(r"\bsk-(?!ant-)[0-9A-Za-z_-]{32,}"),
+)
+
+
 # Every rule the scanner uses. The scanner loops over this list, so adding
 # a new rule here is all it takes for it to be checked.
 RULES = [
@@ -203,4 +232,5 @@ RULES = [
     STRIPE_LIVE_SECRET_KEY,
     GOOGLE_API_KEY,
     ANTHROPIC_API_KEY,
+    OPENAI_API_KEY,
 ]
