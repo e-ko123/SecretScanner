@@ -32,7 +32,24 @@ class Rule:
     # The compiled regex that matches this kind of secret.
     # "Compiled" means Python has already processed the pattern once,
     # so it's fast to reuse on thousands of lines.
+    #
+    # A pattern MAY contain a "named group" called `body`, written
+    # (?P<body>...). It marks the variable part of a token: the part after
+    # its fixed prefix. For example, in an AWS key ID the body is the 16
+    # characters after "AKIA". Placeholder detection (placeholders.py) only
+    # looks at the body, and only for rules that define one. Rules without
+    # a body group are never treated as placeholders by those checks.
     pattern: re.Pattern
+
+    # A short, stable identifier, e.g. "aws-access-key-id". It's used to
+    # build finding fingerprints (see ignores.py). Unlike `name`, it must
+    # never change once released: changing it would change every
+    # fingerprint for this rule and undo users' dismissed findings.
+    #
+    # `= ""` gives it a default value, so code that builds a Rule with only
+    # a name and a pattern (like some tests) keeps working. When it's empty,
+    # the scanner falls back to using `name` as the identifier.
+    id: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -45,8 +62,14 @@ class Rule:
 #               or digits on its left. So "xAKIA..." won't match.
 #   AKIA        the exact letters A, K, I, A. Every long-term AWS access key
 #               ID starts with this.
+#   (?P<body>   start of a "named group" called body. A group captures the
+#               text matched inside the brackets, and naming it lets other
+#               code ask for it by name: match.group("body"). It doesn't
+#               change WHAT the pattern matches, only labels a part of it.
+#               Here the body is everything after "AKIA".
 #   [0-9A-Z]    any one character that is a digit or a CAPITAL letter...
 #   {16}        ...repeated exactly 16 times.
+#   )           end of the body group.
 #   \b          another word boundary: the key must end here, so a longer
 #               string like AKIA + 20 characters doesn't match.
 #
@@ -55,7 +78,8 @@ class Rule:
 # Python would turn \b into a "backspace" character and the pattern would break.
 AWS_ACCESS_KEY_ID = Rule(
     name="AWS Access Key ID",
-    pattern=re.compile(r"\bAKIA[0-9A-Z]{16}\b"),
+    pattern=re.compile(r"\bAKIA(?P<body>[0-9A-Z]{16})\b"),
+    id="aws-access-key-id",
 )
 
 
@@ -75,12 +99,15 @@ AWS_ACCESS_KEY_ID = Rule(
 #   (ghp|gho|ghu|ghs|ghr)  ONE of these five prefixes. The | means "or",
 #                          and the brackets group the choices together.
 #   _                      a literal underscore.
+#   (?P<body>...)          the "body" group (see the AWS rule): the 36
+#                          characters after the prefix.
 #   [0-9a-zA-Z]            one digit, lowercase letter, or capital letter...
 #   {36}                   ...repeated exactly 36 times.
 #   \b                     word boundary: the token must end here.
 GITHUB_TOKEN = Rule(
     name="GitHub Token",
-    pattern=re.compile(r"\b(ghp|gho|ghu|ghs|ghr)_[0-9a-zA-Z]{36}\b"),
+    pattern=re.compile(r"\b(ghp|gho|ghu|ghs|ghr)_(?P<body>[0-9a-zA-Z]{36})\b"),
+    id="github-token",
 )
 
 
@@ -97,9 +124,14 @@ GITHUB_TOKEN = Rule(
 #   [0-9a-zA-Z_]    one letter, digit, or underscore...
 #   {82}            ...repeated exactly 82 times.
 #   \b              word boundary: the token must end here.
+#
+# No body group: the part after the prefix is made of two pieces joined by
+# an underscore, so "the body" isn't one simple run of characters. We don't
+# guess, so placeholder checks don't apply to this rule.
 GITHUB_FINE_GRAINED_TOKEN = Rule(
     name="GitHub Fine-Grained Token",
     pattern=re.compile(r"\bgithub_pat_[0-9a-zA-Z_]{82}\b"),
+    id="github-fine-grained-token",
 )
 
 
@@ -123,9 +155,13 @@ GITHUB_FINE_GRAINED_TOKEN = Rule(
 #   {10,}          ...repeated 10 OR MORE times. Slack tokens don't have one
 #                  fixed length, so we say "at least 10" instead of an exact
 #                  number. Nothing after the comma means "no upper limit".
+#
+# No body group: a Slack token has several dash-separated parts, so there
+# isn't one simple body to check for placeholders.
 SLACK_TOKEN = Rule(
     name="Slack Token",
     pattern=re.compile(r"\bxox[abprs]-[0-9A-Za-z-]{10,}"),
+    id="slack-token",
 )
 
 
@@ -141,12 +177,15 @@ SLACK_TOKEN = Rule(
 # The pattern, piece by piece:
 #   \b             word boundary: nothing glued on the left.
 #   sk_live_       the exact text "sk_live_" ("sk" = secret key).
+#   (?P<body>...)  the "body" group (see the AWS rule): everything after
+#                  the prefix.
 #   [0-9a-zA-Z]    one digit or letter...
 #   {24,}          ...repeated 24 OR MORE times. Older keys have exactly 24;
 #                  newer ones are longer, so "at least 24" catches both.
 STRIPE_LIVE_SECRET_KEY = Rule(
     name="Stripe Live Secret Key",
-    pattern=re.compile(r"\bsk_live_[0-9a-zA-Z]{24,}"),
+    pattern=re.compile(r"\bsk_live_(?P<body>[0-9a-zA-Z]{24,})"),
+    id="stripe-live-secret-key",
 )
 
 
@@ -159,6 +198,8 @@ STRIPE_LIVE_SECRET_KEY = Rule(
 # The pattern, piece by piece:
 #   \b               word boundary: nothing glued on the left.
 #   AIza             the exact text "AIza" (note the lowercase "z" and "a").
+#   (?P<body>...)    the "body" group (see the AWS rule): the 35
+#                    characters after the prefix.
 #   [0-9A-Za-z_-]    one digit, letter, underscore, or dash...
 #   {35}             ...repeated exactly 35 times.
 #
@@ -169,7 +210,8 @@ STRIPE_LIVE_SECRET_KEY = Rule(
 # boundary there and \b would wrongly fail. Leaving it off is the simple fix.
 GOOGLE_API_KEY = Rule(
     name="Google API Key",
-    pattern=re.compile(r"\bAIza[0-9A-Za-z_-]{35}"),
+    pattern=re.compile(r"\bAIza(?P<body>[0-9A-Za-z_-]{35})"),
+    id="google-api-key",
 )
 
 
@@ -187,9 +229,13 @@ GOOGLE_API_KEY = Rule(
 #   {32,}           ...repeated 32 OR MORE times. Real keys are much longer;
 #                   "at least 32" is enough to skip short placeholder text
 #                   like "sk-ant-xxxx" in documentation.
+#
+# No body group: real keys contain more parts after "sk-ant-" (such as
+# "api03-"), so there isn't one simple body to check for placeholders.
 ANTHROPIC_API_KEY = Rule(
     name="Anthropic API Key",
     pattern=re.compile(r"\bsk-ant-[0-9A-Za-z_-]{32,}"),
+    id="anthropic-api-key",
 )
 
 
@@ -216,9 +262,13 @@ ANTHROPIC_API_KEY = Rule(
 #   [0-9A-Za-z_-]   one digit, letter, underscore, or dash...
 #   {32,}           ...repeated 32 OR MORE times, to skip short placeholder
 #                   text like "sk-xxxx" in documentation.
+#
+# No body group: this rule covers several key formats (older keys,
+# "sk-proj-" keys, and others), so there isn't one simple body to check.
 OPENAI_API_KEY = Rule(
     name="OpenAI API Key",
     pattern=re.compile(r"\bsk-(?!ant-)[0-9A-Za-z_-]{32,}"),
+    id="openai-api-key",
 )
 
 
@@ -249,9 +299,13 @@ OPENAI_API_KEY = Rule(
 # next to letters and digits (see the Google rule for why).
 # Public keys and certificates ("BEGIN PUBLIC KEY", "BEGIN CERTIFICATE") are
 # meant to be shared, so they don't match: they don't contain "PRIVATE KEY".
+#
+# No body group: the match is only the header line, never the key itself,
+# so there's nothing to check for placeholders.
 PRIVATE_KEY = Rule(
     name="Private Key",
     pattern=re.compile(r"-----BEGIN[A-Z ]*PRIVATE KEY"),
+    id="private-key",
 )
 
 

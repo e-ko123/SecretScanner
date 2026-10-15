@@ -5,7 +5,10 @@ write a complete fake key as plain text in this file. We build it in code
 instead ("AKIA" + "X" * 16), so the full key string never appears here.
 """
 
+import re
+
 from secretscan.rules import (
+    RULES,
     ANTHROPIC_API_KEY,
     AWS_ACCESS_KEY_ID,
     GITHUB_FINE_GRAINED_TOKEN,
@@ -15,6 +18,7 @@ from secretscan.rules import (
     PRIVATE_KEY,
     SLACK_TOKEN,
     STRIPE_LIVE_SECRET_KEY,
+    Rule,
 )
 
 # A fake AWS key: "AKIA" plus 16 X's = 20 characters, the right shape.
@@ -268,3 +272,41 @@ def test_private_key_rule_ignores_public_keys_and_certificates():
 def test_private_key_rule_ignores_lowercase_mentions():
     # Talking ABOUT private keys in normal text isn't a leak.
     assert PRIVATE_KEY.pattern.search("never commit your private key") is None
+
+
+# --- Rule metadata: stable ids and token bodies ------------------------------
+
+def test_every_rule_has_a_unique_id():
+    # Fingerprints are built from rule ids, so every rule needs its own.
+    ids = [rule.id for rule in RULES]
+    # No rule is missing an id...
+    assert all(ids)
+    # ...and no two rules share one. (A set throws away duplicates, so if
+    # the set is smaller than the list, something was repeated.)
+    assert len(set(ids)) == len(ids)
+
+
+def test_rule_id_defaults_to_empty_for_custom_rules():
+    # Rules made with just a name and a pattern still work.
+    rule = Rule(name="Custom", pattern=re.compile("abc"))
+    assert rule.id == ""
+
+
+def test_body_group_is_the_part_after_the_prefix():
+    # The match is still the WHOLE key; the body is just the variable part.
+    key = "AKIA" + "Z3K9P2M7W4Q8T6N5"
+    match = AWS_ACCESS_KEY_ID.pattern.search(f"k = '{key}'")
+    assert match.group(0) == key
+    assert match.group("body") == "Z3K9P2M7W4Q8T6N5"
+
+
+def test_only_rules_with_a_simple_body_define_one():
+    # `groupindex` is a dictionary of a pattern's NAMED groups. These rules
+    # have one clear "variable part", so they define a body...
+    for rule in [AWS_ACCESS_KEY_ID, GITHUB_TOKEN, STRIPE_LIVE_SECRET_KEY, GOOGLE_API_KEY]:
+        assert "body" in rule.pattern.groupindex
+    # ...and these have several parts (or, for private keys, only a
+    # header), so they don't.
+    for rule in [GITHUB_FINE_GRAINED_TOKEN, SLACK_TOKEN, ANTHROPIC_API_KEY,
+                 OPENAI_API_KEY, PRIVATE_KEY]:
+        assert "body" not in rule.pattern.groupindex
