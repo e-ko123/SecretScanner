@@ -17,6 +17,7 @@ It's a small, dependency-free command-line tool written in Python, inspired by p
 - [Installation](#installation)
 - [Quick start](#quick-start)
 - [Usage](#usage)
+- [Handling false alarms](#handling-false-alarms)
 - [What it detects](#what-it-detects)
 - [How it works](#how-it-works)
 - [What to do if you find a real secret](#what-to-do-if-you-find-a-real-secret)
@@ -30,7 +31,7 @@ It's a small, dependency-free command-line tool written in Python, inspired by p
 
 ## Project status
 
-🚧 **Work in progress.** This README describes how the finished tool will work. Features are checked off as they are built and tested.
+🚧 **Work in progress.** Features are checked off as they are built and tested. Anything marked ***(planned)*** in this README is **not built yet**; it describes how that part will work once it is.
 
 - [ ] **Phase 1: Core scanner.** Scan files and folders, detect secrets, mask output, exit codes, ignore comments.
 - [ ] **Phase 2: Git integration.** `--staged` scanning and the `install-hook` command.
@@ -42,7 +43,7 @@ It's a small, dependency-free command-line tool written in Python, inspired by p
 
 Leaking a secret is one of the most common and most expensive mistakes a developer can make. A single API key pushed to a public GitHub repo can be found by automated bots within minutes and used to run up huge bills or steal data.
 
-I wanted to understand how tools that prevent this actually work, so I built a simpler version from scratch. Along the way I learned about regular expressions, measuring randomness with Shannon entropy, how git stores staged changes, and how git hooks work. I kept the code small and readable on purpose, so every part can be understood and explained.
+I wanted to understand how tools that prevent this actually work, so I built a simpler version from scratch. Along the way I'm learning about regular expressions, measuring randomness with Shannon entropy, how git stores staged changes, and how git hooks work (some of these parts are still being built). I kept the code small and readable on purpose, so every part can be understood and explained.
 
 ---
 
@@ -59,7 +60,7 @@ Then you forget, run `git commit`, and push. Now your key is on GitHub, and **de
 `secretscan` helps in two ways:
 
 1. **On demand:** run `secretscan` on any folder to find secrets that are already there.
-2. **Automatically:** install it as a *git hook* (a script git runs for you at certain moments). It then checks every commit before it's created, and **blocks the commit** if it finds a secret.
+2. **Automatically *(planned)*:** install it as a *git hook* (a script git runs for you at certain moments). It then checks every commit before it's created, and **blocks the commit** if it finds a secret.
 
 ---
 
@@ -134,13 +135,16 @@ If you see a help message listing the available options, you're done. 🎉
 ```bash
 # Scan the folder you're currently in
 secretscan
+```
 
-# Protect a git repository so commits with secrets are blocked
+You don't need to change your code or add special comments first: common placeholder keys are skipped automatically, and any remaining false alarm can be dismissed in a separate file (see [Handling false alarms](#handling-false-alarms)).
+
+*(planned)* To protect a git repository so commits with secrets are blocked:
+
+```bash
 cd path/to/your/repo
 secretscan install-hook
 ```
-
-That's it. From now on, every `git commit` in that repository is checked automatically.
 
 ---
 
@@ -158,10 +162,11 @@ secretscan config.py         # scan a single file
 
 ```text
 config.py:12    AWS Access Key ID   AKIA****************
-src/app.js:40   Generic Secret      sup3*************
+src/app.js:40   GitHub Token        ghp_************************************
 keys/id_rsa:1   Private Key         ----***************************
 
 Found 3 possible secrets in 3 files.
+Suppressed 2 recognized placeholders (use --include-placeholders to see).
 ```
 
 Each line shows:
@@ -170,13 +175,26 @@ Each line shows:
 - **What:** the type of secret it looks like.
 - **A masked preview:** only the first 4 characters are shown. The rest are replaced with `*`, so **secretscan never prints a full secret to your screen** (where it could end up in logs, screenshots, or screen shares). Short secrets (8 characters or fewer) are hidden completely, since showing 4 characters would give most of them away.
 
-The last line is a summary. If nothing is found, that's the only line you'll see:
+After the findings comes a summary. If anything was hidden (recognized placeholders, or findings you dismissed), a line says how many and how to see them. If nothing is found at all, the summary is the only line you'll see:
 
 ```text
 No secrets found.
 ```
 
-### Scan only what you're about to commit
+If nothing is left to report but some matches were hidden, it says **"No reportable secrets found."** instead, because something *was* matched; secretscan just judged it not worth reporting.
+
+### All options
+
+| Option | What it does |
+|---|---|
+| `path` | The file or folder to scan (default: the current folder) |
+| `--include-placeholders` | Also report recognized placeholder keys instead of hiding them |
+| `--show-ids` | Show each finding's ID, for dismissing it in `.secretscanignore` |
+| `--ignore-file PATH` | Use this ignore file instead of `.secretscanignore` in the scanned folder |
+| `--no-ignore` | Don't use any ignore file. Can't be combined with `--ignore-file` |
+| `--version`, `--help` | Show the version or the help text |
+
+### Scan only what you're about to commit *(planned)*
 
 ```bash
 secretscan --staged
@@ -191,7 +209,7 @@ Two details make this accurate:
 
 This is the mode the git hook uses.
 
-### Block commits automatically (git hook)
+### Block commits automatically (git hook) *(planned)*
 
 ```bash
 cd path/to/your/repo
@@ -213,7 +231,8 @@ How to fix this:
   2. Run `git add` on the file again.
   3. Commit again.
 
-If this is a false alarm, add a `secretscan:ignore` comment to that line.
+If this is a false alarm, dismiss it in .secretscanignore
+(run `secretscan --show-ids` to get its ID).
 ```
 
 **If a pre-commit hook already exists**, `install-hook` won't touch it. It prints a message and stops, so it never destroys someone's existing setup by accident. To replace the existing hook anyway:
@@ -224,21 +243,7 @@ secretscan install-hook --force
 
 > ⚠️ Anyone can skip git hooks with `git commit --no-verify`. The hook is a safety net against accidents, not a security barrier. For a check that can't be skipped, also run `secretscan` in CI (see [What I'd add next](#what-id-add-next)).
 
-### Ignore a line on purpose
-
-Sometimes a line *looks* like a secret but isn't, like a fake key in documentation. Add a `secretscan:ignore` comment to that line, and secretscan will skip it:
-
-```python
-EXAMPLE_TOKEN = "this-is-just-documentation"  # secretscan:ignore
-```
-
-```javascript
-const demoKey = "not-a-real-key"; // secretscan:ignore
-```
-
-It works with any comment style, because secretscan just looks for the text `secretscan:ignore` anywhere on the line.
-
-### JSON output (for other programs)
+### JSON output (for other programs) *(planned)*
 
 ```bash
 secretscan --json
@@ -259,7 +264,7 @@ This prints results as [JSON](https://www.json.org/), a structured format that s
 
 Secrets are masked in JSON output too.
 
-### Colors
+### Colors *(planned)*
 
 When you run secretscan in a terminal, output is colored to make findings easy to spot. When the output goes somewhere else (a file, another program, a CI log), it automatically switches to plain text so no strange color codes end up in your files.
 
@@ -269,11 +274,114 @@ Every command-line program finishes with an *exit code*: a number that tells wha
 
 | Exit code | Meaning |
 |---|---|
-| `0` | No secrets found ✅ |
+| `0` | Nothing left to report ✅ (hidden placeholders and dismissed findings don't count) |
 | `1` | One or more secrets found 🚫 |
-| `2` | The command was used incorrectly (for example, a file that doesn't exist) ⚠️ |
+| `2` | The command was used incorrectly (for example, a file that doesn't exist), or the ignore file is broken ⚠️ |
 
 This is what makes automation possible: git cancels the commit when a pre-commit hook exits with `1`, and CI systems mark a build as failed the same way.
+
+---
+
+## Handling false alarms
+
+Some text has the exact *shape* of a key without being one, like an example in documentation. secretscan handles this in three layers, so you can use it on an existing project without changing that project's code.
+
+### 1. Recognized placeholders are skipped automatically
+
+secretscan recognizes a **small, deliberately narrow** set of obvious placeholders and hides them by default:
+
+- **Published example values.** Exact example keys that a provider publishes in its own documentation. Currently this is one value: the example access key ID from [AWS's IAM documentation](https://docs.aws.amazon.com/IAM/latest/UserGuide/security-creds-programmatic-access.html) (the one ending in `EXAMPLE`). It must match exactly, including capital letters.
+- **Filler-only keys.** A key whose variable part (everything after its fixed prefix, like `AKIA`) is made **entirely** of one filler character: `X`, `x`, or `0`, at least 16 characters long. Example: `AKIA` followed by sixteen `X`s. This applies only to rules where that variable part is one simple run of characters: **AWS access key IDs, GitHub tokens (`ghp_` etc.), Stripe live keys, and Google API keys.** Keys with several parts (Slack, OpenAI, Anthropic, GitHub fine-grained tokens) and private key headers are never treated as filler.
+
+That's the whole list. In particular, secretscan does **not** hide a key because:
+
+- it's in a **comment**. Commenting out a key doesn't remove it from the file, and people often "disable" a real key that way without revoking it. A key in a comment is still leaked.
+- it's in a **tests, docs, or examples folder**. Real keys get pasted into those too.
+- nearby text says **"example", "fake", "test", "demo", or "placeholder"**. A comment is not proof.
+- the key merely **contains** a run of `X`s, or words like `TEST`. Only an *entire* filler body counts.
+
+The filler check is a sensible guess, not proof: a real key that happened to be all `0`s would be hidden. To see everything hidden this way, add `--include-placeholders`. Hidden placeholders are counted in the summary, and each one shows its reason when you include them:
+
+```text
+docs/setup.md:4   AWS Access Key ID   AKIA****************   (recognized placeholder: token body is all 'X' filler)
+```
+
+### 2. Dismiss a reviewed finding in `.secretscanignore`
+
+For anything else that you've checked and know is harmless, like a realistic-looking fake key in a test, you can dismiss that one finding **without editing the file it's in**:
+
+1. Run `secretscan` as usual.
+2. Run it again with `--show-ids` to see each finding's ID (a long string of letters and digits):
+
+   ```text
+   tests/test_api.py:12   AWS Access Key ID   AKIA****************   ca9aab23320c6c2a2680248fb6f4140873aba772489ba573945359a64a3178ab
+   ```
+
+3. **Review the finding.** Make sure it really isn't a secret.
+4. Add its ID and a short reason to a file named `.secretscanignore` in the folder you scan:
+
+   ```json
+   {
+     "version": 1,
+     "findings": [
+       {
+         "id": "ca9aab23320c6c2a2680248fb6f4140873aba772489ba573945359a64a3178ab",
+         "reason": "Fake key used in API client tests"
+       }
+     ]
+   }
+   ```
+
+5. Run `secretscan` again. The finding is gone, and the summary says how many were ignored.
+
+There's deliberately no command that adds *every* current finding to the ignore file in one go: a first scan can contain real leaked keys, and each one deserves a look.
+
+**The ignore file format** is strict, so typos are caught instead of silently doing nothing:
+
+- The top level is an object with exactly two fields: `"version"` (must be the number `1`) and `"findings"` (a list).
+- Each entry in `"findings"` has exactly two fields: `"id"`, a full 64-character ID in lowercase letters and digits, copied from `--show-ids`; and `"reason"`, a non-empty explanation.
+- The same ID can't be listed twice.
+
+If the file breaks any of these rules, or isn't valid JSON, secretscan stops with an error and exit code `2`. It never quietly treats a broken ignore file as empty. Error messages say where the problem is, but never print the file's contents.
+
+**Which ignore file is used:**
+
+- By default, `.secretscanignore` in the scanned folder (or, when you scan a single file, the folder that file is in). If there's no such file, the scan runs normally.
+- `--ignore-file PATH` uses a different file. If that file doesn't exist, that's an error (exit code `2`).
+- `--no-ignore` uses no ignore file at all. It doesn't turn off placeholder hiding or `secretscan:ignore` comments.
+- The ignore file itself is never scanned for secrets.
+
+**How IDs work, and their limits.** An ID is a *fingerprint*: a SHA-256 hash of the rule that matched, the file's path relative to the scanned folder, and the matched text. That means:
+
+- Adding or removing lines above a finding **doesn't** change its ID (the line number isn't included).
+- Changing the key, moving it to another file, or renaming the file **does** change the ID, so the dismissal no longer applies and the finding is reported again.
+- Checking out the project in a different place on disk keeps the same IDs.
+- IDs are relative to the folder you scan. Scanning `secretscan src/` instead of `secretscan .` gives different IDs for the same findings, so always scan from the same place.
+- If the exact same key appears more than once in one file, every copy has the same ID, and dismissing it dismisses all of them in that file.
+- For **private keys**, only the header line (e.g. `BEGIN RSA PRIVATE KEY`) is matched, not the key itself. So dismissing one private key in a file also dismisses any other private key with the same header in that file.
+- A fingerprint keeps the ignore file free of plain-text keys, but it's **not encryption**: for a short or guessable value, someone could find it by trying candidates until one produces the same hash.
+
+### 3. Ignore a line with a comment
+
+If you'd rather mark a line in the code itself, add a `secretscan:ignore` comment to it, and secretscan will skip every match on that line:
+
+```python
+EXAMPLE_TOKEN = "this-is-just-documentation"  # secretscan:ignore
+```
+
+```javascript
+const demoKey = "not-a-real-key"; // secretscan:ignore
+```
+
+It works with any comment style, because secretscan just looks for the text `secretscan:ignore` anywhere on the line. These comments always apply, even with `--include-placeholders` and `--no-ignore`.
+
+### Seeing everything that was hidden
+
+```bash
+secretscan path/to/project --include-placeholders --no-ignore --show-ids
+```
+
+This shows recognized placeholders and dismissed findings alongside everything else, with their IDs. Lines marked with `secretscan:ignore` are still skipped.
 
 ---
 
@@ -290,7 +398,7 @@ This is what makes automation possible: git cancels the commit when a pre-commit
 | **OpenAI API key** | `sk-p****************************…` | Starts with `sk-` (including `sk-proj-`), but not `sk-ant-` |
 | **Anthropic API key** | `sk-a****************************…` | Starts with `sk-ant-` |
 | **Private key** | `----**********************` | Any `-----BEGIN ... PRIVATE KEY-----` header (RSA, EC, DSA, OpenSSH, encrypted, PGP) |
-| **Generic password / secret** | `password = "****"` | Assignments like `password = "..."`, `api_key: "..."`, `secret = '...'`, but **only if the value looks random** (see below) |
+| **Generic password / secret** *(planned)* | `password = "****"` | Assignments like `password = "..."`, `api_key: "..."`, `secret = '...'`, but **only if the value looks random** (see below) |
 
 ### What it skips
 
@@ -300,11 +408,13 @@ To stay fast and avoid noise, secretscan does **not** scan:
 - **Binary files** such as images, PDFs, and compiled programs
 - **Very large files** (over about 1 MB), which are almost always generated data rather than code a person wrote
 
+Comments, documentation, tests, and example files **are** scanned. See [Handling false alarms](#handling-false-alarms) for why, and for how placeholders are handled.
+
 ---
 
 ## How it works
 
-secretscan does three main things. None of them is magic, and the whole tool is a few hundred lines of plain Python.
+None of this is magic, and the whole tool is a few hundred lines of plain Python. Parts marked *(planned)* aren't built yet.
 
 ### 1. Rules: pattern matching with regular expressions
 
@@ -320,7 +430,15 @@ Read it as: "the letters `AKIA`, then exactly 16 characters that are each a digi
 
 Each kind of secret has its own rule in [`src/secretscan/rules.py`](src/secretscan/rules.py). secretscan reads each file line by line and checks every line against every rule.
 
-### 2. The randomness check: telling real passwords from placeholders
+### 2. Placeholder recognition
+
+Each match is then checked on its own by [`src/secretscan/placeholders.py`](src/secretscan/placeholders.py): is it an exact published example, or is its variable part entirely filler? If so, it's set aside (but counted) instead of reported. Two matches on the same line are judged separately, so a placeholder next to a real-looking key never hides the real one. See [Handling false alarms](#handling-false-alarms) for the exact rules.
+
+### 3. Fingerprints and the ignore file
+
+Every remaining finding gets an ID: a SHA-256 hash of the rule, the file's relative path, and the matched text ([`src/secretscan/ignores.py`](src/secretscan/ignores.py)). Findings whose ID is listed in `.secretscanignore` are dropped. Everything left is printed (masked) and decides the exit code.
+
+### 4. The randomness check *(planned)*
 
 Some secrets don't have a fixed shape, like a database password in `password = "..."`. A rule that flagged *every* `password = "..."` would raise false alarms all the time:
 
@@ -330,15 +448,15 @@ password = "your-password-here" # also a placeholder
 password = "q8#Lz!v2Wm@9xR"     # this one looks real
 ```
 
-The difference is **randomness**. Real secrets are usually random-looking; placeholders are made of ordinary words. secretscan measures randomness using **Shannon entropy**, a score from information theory that roughly answers: *"how unpredictable is each character in this text?"*
+The difference is **randomness**. Real secrets are usually random-looking; placeholders are made of ordinary words. secretscan will measure randomness using **Shannon entropy**, a score from information theory that roughly answers: *"how unpredictable is each character in this text?"*
 
 - `"aaaaaaaa"` → entropy **0**: every character is the same, totally predictable.
 - `"changeme"` → **low** entropy: few distinct letters, repeated.
 - `"q8#Lz!v2Wm@9xR"` → **high** entropy: many different characters, no pattern.
 
-The generic rule only reports a value if its entropy is above a threshold, which filters out most placeholders while still catching real passwords.
+The generic rule will only report a value if its entropy is above a threshold, which should filter out most placeholders while still catching real passwords. This is **not implemented yet**. When it is, it will apply only to the generic rule: a key with a recognizable provider shape will never be hidden just because it scores low on randomness.
 
-### 3. The git hook: catching secrets before they're committed
+### 5. The git hook: catching secrets before they're committed *(planned)*
 
 Git lets you run your own scripts at certain moments, called **hooks**. A **pre-commit hook** runs right after you type `git commit` but *before* the commit is actually created. If the hook fails (exits with a code other than `0`), git cancels the commit.
 
@@ -351,10 +469,11 @@ Git lets you run your own scripts at certain moments, called **hooks**. A **pre-
 
 ```text
           ┌────────────────────┐
-          │  files or staged   │
-          │      changes       │
+          │   files (staged    │
+          │ changes: planned)  │
           └─────────┬──────────┘
-                    │  skip ignored folders, binary files, huge files
+                    │  skip ignored folders, binary files, huge files,
+                    │  and the ignore file itself
                     ▼
           ┌────────────────────┐
           │  read line by line │
@@ -362,8 +481,17 @@ Git lets you run your own scripts at certain moments, called **hooks**. A **pre-
                     │  skip lines containing "secretscan:ignore"
                     ▼
           ┌────────────────────┐
-          │  check each rule   │──── generic rule? → randomness check
+          │  check each rule   │
           └─────────┬──────────┘
+                    │  set aside recognized placeholders
+                    │  (unless --include-placeholders)
+                    ▼
+          ┌────────────────────┐
+          │ fingerprint each   │
+          │ finding            │
+          └─────────┬──────────┘
+                    │  drop IDs listed in .secretscanignore
+                    │  (unless --no-ignore)
                     ▼
           ┌────────────────────┐
           │ print masked report│
@@ -391,11 +519,14 @@ Your virtual environment probably isn't active. Run `source .venv/bin/activate` 
 **`pip: command not found`**
 Try `python3 -m pip install .` instead.
 
-**The hook isn't running when I commit.**
+**The hook isn't running when I commit.** *(applies once `install-hook` is built)*
 Make sure you ran `secretscan install-hook` *inside* the repository you want to protect, and check that `.git/hooks/pre-commit` exists. The hook calls the `secretscan` command, so it must be installed where git can find it. Installing with `pipx` is the most reliable option.
 
 **It flagged something that isn't a secret.**
-Add `secretscan:ignore` in a comment on that line. If it happens often for the same kind of value, please open an issue.
+Check it carefully first. If it really is harmless, run `secretscan --show-ids` and add its ID to `.secretscanignore` (see [Handling false alarms](#handling-false-alarms)), or add a `secretscan:ignore` comment to that line. If it happens often for the same kind of value, please open an issue.
+
+**`secretscan: error: ignore file ...`**
+The ignore file is broken or doesn't match the expected format, and the message says which part. Fix it, or run with `--no-ignore` to scan without it.
 
 ---
 
@@ -403,8 +534,11 @@ Add `secretscan:ignore` in a comment on that line. If it happens often for the s
 
 secretscan is a learning project, and it's honest to say what it *doesn't* do:
 
-- **It only knows the patterns it was given.** A secret from a service with no rule, or a password with low randomness, can slip through.
-- **The randomness check is a trade-off.** A truly random-looking non-secret (like a hash) can be flagged, and a weak real password (like `summer2024`) can be missed.
+- **It only knows the patterns it was given.** A secret from a service with no rule can slip through. Generic passwords aren't detected yet.
+- **It can't tell a realistic fake key from a real one.** Scanning offline, a well-made fake key looks exactly like a real key. Only a few obvious placeholders are recognized automatically; the rest need a person to review and dismiss them.
+- **Placeholder recognition is a guess.** A real key whose variable part happened to be all `X`s or `0`s would be hidden. `--include-placeholders` shows them.
+- **Finding IDs depend on the scanned folder,** and a private key's ID covers only its header line (see [How IDs work](#2-dismiss-a-reviewed-finding-in-secretscanignore)).
+- *(planned)* **The randomness check will be a trade-off.** A truly random-looking non-secret (like a hash) could be flagged, and a weak real password (like `summer2024`) could be missed.
 - **It doesn't scan git history.** It checks your files as they are now, or your staged changes, but not secrets buried in old commits.
 - **Git hooks can be skipped** with `git commit --no-verify`, and each person has to install the hook on their own machine.
 - **It can't confirm a key is live.** It reports things that *look* like secrets; it doesn't contact AWS or GitHub to check whether a key actually works.
