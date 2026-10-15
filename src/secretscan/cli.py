@@ -28,7 +28,67 @@ from importlib.metadata import version
 from pathlib import Path
 
 # `find_files` works out which files to scan; `scan_file` scans one file.
-from secretscan.scanner import find_files, scan_file
+# `Finding` is the type that holds one result (used in type hints below).
+from secretscan.scanner import Finding, find_files, scan_file
+
+# How many characters of a secret we show before hiding the rest with `*`.
+# 4 is enough to recognise which key it is (e.g. "AKIA" = AWS), but far too
+# little for anyone to actually use it.
+VISIBLE_CHARS = 4
+
+
+def mask(secret: str) -> str:
+    """Hide most of a secret so it's safe to print.
+
+    Examples:
+        mask("AKIA" + 16 more characters)  ->  "AKIA****************"
+        mask("hunter2")                    ->  "*******"
+
+    The result is always the same length as the secret, so you can still
+    tell roughly how long it was.
+    """
+    # Short secrets are hidden completely. If a password is only 6
+    # characters long, showing the first 4 would give away most of it.
+    # "VISIBLE_CHARS * 2" means: only show the start if at least as many
+    # characters stay hidden as are shown.
+    if len(secret) <= VISIBLE_CHARS * 2:
+        return "*" * len(secret)
+
+    # `secret[:VISIBLE_CHARS]` is a "slice": the first 4 characters.
+    # Then add one `*` for every remaining character.
+    # (In Python, multiplying a string by a number repeats it: "*" * 3 == "***".)
+    hidden_count = len(secret) - VISIBLE_CHARS
+    return secret[:VISIBLE_CHARS] + "*" * hidden_count
+
+
+def print_findings(findings: list[Finding]) -> None:
+    """Print one line per finding, lined up in neat columns.
+
+    Example output:
+        src/settings.py:3   AWS Access Key ID   AKIA****************
+        config/dev.py:12    AWS Access Key ID   AKIA****************
+    """
+    # Build the "file:line" text for every finding first, so we can
+    # measure how wide the first column needs to be.
+    locations = [f"{finding.path}:{finding.line_number}" for finding in findings]
+
+    # The widest entry in each column decides that column's width.
+    # `max(...)` here goes through every item and keeps the biggest length.
+    location_width = max(len(location) for location in locations)
+    rule_width = max(len(finding.rule_name) for finding in findings)
+
+    # `zip` walks through two lists side by side, giving us one item from
+    # each at a time: (first location, first finding), (second, second)...
+    for location, finding in zip(locations, findings):
+        # `ljust(width)` pads text with spaces on the right until it's
+        # `width` characters long. That's what makes the columns line up.
+        # The secret itself is ALWAYS passed through mask() first: the
+        # tool must never print a full secret.
+        print(
+            f"{location.ljust(location_width)}   "
+            f"{finding.rule_name.ljust(rule_width)}   "
+            f"{mask(finding.secret)}"
+        )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -104,11 +164,10 @@ def main(argv: list[str] | None = None) -> int:
     for file in find_files(path):
         findings.extend(scan_file(file))
 
-    # Print one line per finding, e.g.:  config.py:12  AWS Access Key ID
-    # We deliberately do NOT print `finding.secret`: the tool must never
-    # show a full secret on screen. A masked preview comes in a later step.
-    for finding in findings:
-        print(f"{finding.path}:{finding.line_number}  {finding.rule_name}")
+    # Print the findings (if there are any). print_findings can't handle an
+    # empty list, because there'd be nothing to measure the columns from.
+    if findings:
+        print_findings(findings)
 
     # An empty list counts as False in Python, so this reads as:
     # "if anything was found, exit with 1; otherwise exit with 0".

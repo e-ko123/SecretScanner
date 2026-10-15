@@ -11,9 +11,34 @@ import pytest
 
 # Import the function we want to test. This works because the project is
 # installed (`pip install -e ".[dev]"`), so Python can find the package.
-from secretscan.cli import main
+from secretscan.cli import main, mask
 
 FAKE_AWS_KEY = "AKIA" + "X" * 16
+
+
+# --- mask ------------------------------------------------------------------
+
+def test_mask_shows_first_4_characters_of_long_secret():
+    # 20 characters in, 4 shown + 16 stars out.
+    assert mask(FAKE_AWS_KEY) == "AKIA" + "*" * 16
+
+
+def test_mask_keeps_the_same_length():
+    assert len(mask(FAKE_AWS_KEY)) == len(FAKE_AWS_KEY)
+
+
+def test_mask_hides_short_secrets_completely():
+    # 8 characters or fewer: showing 4 would give away too much.
+    assert mask("abcdefgh") == "********"
+    assert mask("abc") == "***"
+
+
+def test_mask_shows_start_just_above_the_short_limit():
+    # 9 characters: long enough that 4 shown still leaves 5 hidden.
+    assert mask("abcdefghi") == "abcd*****"
+
+
+# --- main ------------------------------------------------------------------
 
 
 def test_version_flag_prints_version(capsys):
@@ -46,8 +71,24 @@ def test_file_with_secret_exits_1_and_reports_it(tmp_path, capsys):
     # The output names the file, the line number, and the type of secret...
     assert f"{file}:1" in output
     assert "AWS Access Key ID" in output
+    # ...shows a masked preview...
+    assert "AKIA" + "*" * 16 in output
     # ...but must NEVER contain the full secret.
     assert FAKE_AWS_KEY not in output
+
+
+def test_findings_are_lined_up_in_columns(tmp_path, capsys):
+    # Two files with different name lengths, so the columns need padding.
+    (tmp_path / "a.py").write_text(f"k = '{FAKE_AWS_KEY}'\n")
+    (tmp_path / "much_longer_name.py").write_text(f"k = '{FAKE_AWS_KEY}'\n")
+
+    main([str(tmp_path)])
+
+    # `splitlines()` splits the output into a list of lines.
+    lines = capsys.readouterr().out.splitlines()
+    # The rule name should start at the same position on both lines.
+    # `.index(text)` gives the position where `text` first appears.
+    assert lines[0].index("AWS") == lines[1].index("AWS")
 
 
 def test_clean_file_exits_0_and_prints_nothing(tmp_path, capsys):
