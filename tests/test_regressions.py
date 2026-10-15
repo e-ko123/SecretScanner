@@ -1,6 +1,7 @@
 """Regression cases from the security review; all credentials are synthetic."""
 
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -42,7 +43,15 @@ def test_unicode_text_is_scanned(tmp_path, encoding):
     assert scanner.scan_file(path)[0].secret == AWS
 
 
-@pytest.mark.parametrize("kind", ["large", "binary", "special"])
+# Unix-only assumptions are marked so Windows skips them instead of failing:
+# /dev/null, control characters in file names, and creating symlinks.
+UNIX_ONLY = pytest.mark.skipif(os.name == "nt", reason="relies on Unix-only file system behavior")
+
+
+@pytest.mark.parametrize("kind", [
+    "large", "binary",
+    pytest.param("special", marks=UNIX_ONLY),  # uses /dev/null
+])
 def test_direct_skips_are_errors_not_all_clear(tmp_path, capsys, kind):
     path = tmp_path / "input"
     if kind == "large":
@@ -57,6 +66,7 @@ def test_direct_skips_are_errors_not_all_clear(tmp_path, capsys, kind):
     assert "No secrets found." not in captured.out
 
 
+@UNIX_ONLY
 def test_directory_skips_explain_reasons(tmp_path, capsys):
     (tmp_path / "binary").write_bytes(b"\0binary")
     (tmp_path / "target").mkdir()
@@ -99,6 +109,7 @@ def test_scan_failures_exit_2_without_tracebacks(tmp_path, monkeypatch, capsys, 
     assert "Traceback" not in capsys.readouterr().err
 
 
+@UNIX_ONLY
 def test_filename_cannot_forge_report(tmp_path, capsys):
     path = tmp_path / "x\n\nNo secrets found.\n\x1b[8m中文😀"
     path.write_text(AWS)
@@ -390,7 +401,6 @@ def test_slack_rotation_doc_placeholder_is_recognized(tmp_path, capsys):
 
 # --- second audit: scanning ----------------------------------------------------
 
-import os
 import time
 
 
@@ -498,3 +508,176 @@ def test_file_swapped_for_a_pipe_does_not_hang(tmp_path, capsys, monkeypatch):
 
     monkeypatch.setattr(cli, "find_files", find_then_swap)
     assert cli.main([str(tmp_path)]) == 2
+
+
+# --- second audit: ignore file and command line --------------------------------
+
+def answer(monkeypatch, *answers):
+    """Pretend to be a terminal and answer input() with `answers` in order."""
+    remaining = iter(answers)
+    monkeypatch.setattr(cli, "is_interactive", lambda: True)
+    monkeypatch.setattr("builtins.input", lambda prompt="": next(remaining))
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="named pipes are Unix-only")
+def test_default_ignore_file_that_is_a_pipe_does_not_hang(tmp_path, capsys):
+    os.mkfifo(tmp_path / ".secretscanignore")
+    assert cli.main([str(tmp_path)]) == 2
+    assert "must be a regular file" in capsys.readouterr().err
+
+
+def test_huge_ignore_file_is_rejected(tmp_path, capsys):
+    (tmp_path / ".secretscanignore").write_text(" " * 1_000_001)
+    assert cli.main([str(tmp_path)]) == 2
+    assert "larger than 1 MB" in capsys.readouterr().err
+
+
+def test_show_ids_output_stays_small_with_one_huge_token(tmp_path, capsys):
+    # One 200,000-character project key plus many normal keys used to make
+    # the report about 2 GB, because every line was padded to the huge one.
+    path = tmp_path / "a.txt"
+    path.write_text("sk-proj-" + "Ab12Cd34" * 25_000 + "\n" + (AWS + "\n") * 2000)
+    assert cli.main([str(path), "--show-ids"]) == 1
+    assert len(capsys.readouterr().out) < 2_000_000
+
+
+def test_key_in_a_file_name_is_masked(tmp_path, capsys):
+    path = tmp_path / (AWS + ".txt")
+    path.write_text(AWS + "\n")
+    assert cli.main([str(path)]) == 1
+    output = capsys.readouterr().out
+    assert AWS not in output
+    assert "AKIA****" in output
+
+
+def test_argument_errors_mask_keys_and_escape_control_codes(capsys):
+    with pytest.raises(SystemExit) as exit_info:
+        cli.main(["--" + AWS + "\x1b[8m"])
+    assert exit_info.value.code == 2
+    err = capsys.readouterr().err
+    assert AWS not in err
+    assert "\x1b" not in err
+
+
+def test_git_root_wins_over_a_nested_ignore_file(tmp_path, monkeypatch, capsys):
+    (tmp_path / ".git").mkdir()
+    (tmp_path / "src").mkdir()
+    save_ignore_file(tmp_path / "src" / ".secretscanignore", {})
+    path = tmp_path / "src" / "config.py"
+    path.write_text(AWS)
+    answer(monkeypatch, "y", "fixture")
+    assert cli.main([str(path), "--review"]) == 0
+    # The answer was saved at the repository root, so a full scan honors it...
+    assert cli.main([str(tmp_path)]) == 0
+    # ...and the unused nested file is pointed out.
+    assert "is not used" in capsys.readouterr().err
+
+
+@pytest.mark.skipif(os.name == "nt", reason="symlinks need extra permissions on Windows")
+def test_folder_shortcut_gives_the_same_ids(tmp_path, capsys):
+    real = tmp_path / "real"
+    real.mkdir()
+    (real / "a.txt").write_text(AWS)
+    (tmp_path / "alias").symlink_to(real, target_is_directory=True)
+    finding = scanner.scan_file(real / "a.txt")[0]
+    save_ignore_file(real / ".secretscanignore", {finding_id(finding, real): "fixture"})
+    assert cli.main([str(real)]) == 0
+    assert cli.main([str(tmp_path / "alias")]) == 0
+
+
+def test_review_keeps_ignore_file_edits_made_during_the_review(tmp_path, monkeypatch, capsys):
+    (tmp_path / "a.txt").write_text(AWS)
+    ignore = tmp_path / ".secretscanignore"
+    save_ignore_file(ignore, {})
+    answers = iter(["y"])
+
+    def fake_input(prompt=""):
+        if prompt.startswith("Reason"):
+            # Someone else adds an entry while the user is typing a reason.
+            save_ignore_file(ignore, {"c" * 64: "added elsewhere"})
+            return "fixture"
+        return next(answers)
+
+    monkeypatch.setattr(cli, "is_interactive", lambda: True)
+    monkeypatch.setattr("builtins.input", fake_input)
+    assert cli.main([str(tmp_path), "--review"]) == 0
+    assert set(load_ignore_file(ignore)) >= {"c" * 64}
+    assert len(load_ignore_file(ignore)) == 2
+
+
+def test_reason_with_invalid_unicode_is_rejected_when_loading(tmp_path):
+    path = tmp_path / "ignore"
+    path.write_text('{"version":1,"findings":[{"id":"' + "a" * 64 + '","reason":"\\ud800"}]}')
+    with pytest.raises(IgnoreFileError, match="invalid Unicode"):
+        load_ignore_file(path)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="symlinks need extra permissions on Windows")
+def test_saving_through_a_symlinked_ignore_file_updates_the_shared_file(tmp_path, monkeypatch, capsys):
+    shared = tmp_path / "shared.json"
+    save_ignore_file(shared, {})
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / ".secretscanignore").symlink_to(shared)
+    (project / "a.txt").write_text(AWS)
+    answer(monkeypatch, "y", "fixture")
+    assert cli.main([str(project), "--review"]) == 0
+    assert (project / ".secretscanignore").is_symlink()
+    assert len(load_ignore_file(shared)) == 1
+
+
+def test_files_changed_during_review_are_not_reported_as_clean(tmp_path, monkeypatch, capsys):
+    path = tmp_path / "a.txt"
+    path.write_text(AWS)
+
+    def fake_input(prompt=""):
+        if prompt.startswith("Reason"):
+            # The file is edited while the user is answering.
+            path.write_text("other = '" + GHP + "'\n")
+            return "fixture"
+        return "y"
+
+    monkeypatch.setattr(cli, "is_interactive", lambda: True)
+    monkeypatch.setattr("builtins.input", fake_input)
+    assert cli.main([str(tmp_path), "--review"]) == 2
+    assert "changed during the review" in capsys.readouterr().err
+
+
+def test_closed_stderr_still_exits_2(tmp_path):
+    (tmp_path / ".secretscanignore").write_text("{not json")
+    read_fd, write_fd = os.pipe()
+    os.close(read_fd)
+    try:
+        result = subprocess.run([sys.executable, "-m", "secretscan", str(tmp_path)],
+                                stdout=subprocess.PIPE, stderr=write_fd)
+    finally:
+        os.close(write_fd)
+    assert result.returncode == 2
+
+
+def test_naming_the_ignore_file_directly_scans_it(tmp_path, capsys):
+    ignore = tmp_path / ".secretscanignore"
+    ignore.write_text(json.dumps({"version": 1, "findings": [
+        {"id": "a" * 64, "reason": "was " + AWS}]}))
+    assert cli.main([str(ignore)]) == 1
+
+
+@pytest.mark.skipif(os.name == "nt", reason="symlinks need extra permissions on Windows")
+def test_broken_default_ignore_symlink_is_an_error(tmp_path, capsys):
+    (tmp_path / ".secretscanignore").symlink_to(tmp_path / "missing.json")
+    (tmp_path / "a.txt").write_text("clean\n")
+    assert cli.main([str(tmp_path / "a.txt")]) == 2
+
+
+def test_answers_are_printed_if_no_location_can_be_saved(tmp_path, monkeypatch, capsys):
+    (tmp_path / "a.txt").write_text(AWS)
+    answer(monkeypatch, "y", "fixture")
+
+    def always_fail(*args, **kwargs):
+        raise PermissionError()
+
+    monkeypatch.setattr(cli, "save_ignore_file", always_fail)
+    assert cli.main([str(tmp_path), "--review"]) == 2
+    err = capsys.readouterr().err
+    assert "Add these entries" in err
+    assert '"reason": "fixture"' in err

@@ -18,6 +18,7 @@ from __future__ import annotations
 # argparse is Python's built-in tool for reading command-line options
 # (like `--help` or `--version`). It also writes the help text for us.
 import argparse
+import json
 import os
 import tempfile
 
@@ -31,6 +32,9 @@ from importlib.metadata import version
 
 # `Path` represents a file or folder location (see scanner.py).
 from pathlib import Path
+
+# The rules, used to mask key-shaped text in file names and messages.
+from secretscan.rules import RULES
 
 # Fingerprints and the .secretscanignore file (see ignores.py).
 from secretscan.ignores import (
@@ -50,21 +54,45 @@ from secretscan.scanner import Finding, ScanIssue, find_files, scan_file
 # little for anyone to actually use it.
 VISIBLE_CHARS = 4
 
+# The most stars a masked secret shows (see mask), and the widest the
+# file:line column is padded to. Both keep the report a sensible size.
+MAX_HIDDEN_CHARS = 40
+MAX_LOCATION_WIDTH = 250
+
 
 def display(value: object) -> str:
-    """Escape control/non-ASCII characters so paths cannot forge terminal output.
+    """Make text from outside (file names, error messages) safe to print.
 
-    ASCII escapes also keep column widths predictable without a dependency
-    for measuring emoji, combining characters, or East Asian text.
+    Two steps:
+    1. Mask anything that looks like a key, exactly like findings are
+       masked. A file can be NAMED after a key, and a mistyped option can
+       contain one; printing those as-is would leak the key into logs.
+    2. Escape control and non-ASCII characters, so a file name can't forge
+       or hide terminal output. ASCII escapes also keep column widths
+       predictable without a dependency for measuring emoji or East Asian text.
     """
-    return ascii(str(value))[1:-1]
+    text = str(value)
+    for rule in RULES:
+        # `pattern.sub(function, text)` replaces every match with whatever
+        # the function returns for it; here, the masked version.
+        text = rule.pattern.sub(lambda match: mask(match.group(0)), text)
+    # `ascii()` returns the text as a quoted Python string with escapes;
+    # [1:-1] drops the surrounding quotes.
+    return ascii(text)[1:-1]
 
 
 def scan_root(path: Path) -> Path:
     """Use one project root for single-file and directory reviews."""
     directory = (path if path.is_dir() else path.parent).resolve()
-    for parent in (directory, *directory.parents):
-        if (parent / ".git").exists() or (parent / IGNORE_FILE_NAME).exists():
+    ancestors = (directory, *directory.parents)
+    # A git repository's top folder wins: it's the clearest "project root",
+    # even if a subfolder happens to have its own ignore file.
+    for parent in ancestors:
+        if (parent / ".git").exists():
+            return parent
+    # Otherwise, the nearest folder that already has an ignore file.
+    for parent in ancestors:
+        if (parent / IGNORE_FILE_NAME).exists():
             return parent
     # Outside a repository, commands run inside the project share the cwd.
     cwd = Path.cwd().resolve()
@@ -80,8 +108,11 @@ def mask(secret: str) -> str:
         mask("AKIA" + 16 more characters)  ->  "AKIA****************"
         mask("hunter2")                    ->  "*******"
 
-    The result is always the same length as the secret, so you can still
-    tell roughly how long it was.
+    The result is the same length as the secret, so you can still tell
+    roughly how long it was, up to MAX_HIDDEN_CHARS stars. Longer secrets
+    get that many stars plus their length, e.g. "sk-p********...(5000 chars)".
+    Without a cap, one very long token in a small file could make the report
+    (padded to line up with it) gigabytes long.
     """
     # Short secrets are hidden completely. If a password is only 6
     # characters long, showing the first 4 would give away most of it.
@@ -94,6 +125,8 @@ def mask(secret: str) -> str:
     # Then add one `*` for every remaining character.
     # (In Python, multiplying a string by a number repeats it: "*" * 3 == "***".)
     hidden_count = len(secret) - VISIBLE_CHARS
+    if hidden_count > MAX_HIDDEN_CHARS:
+        return secret[:VISIBLE_CHARS] + "*" * MAX_HIDDEN_CHARS + f"...({len(secret)} chars)"
     return secret[:VISIBLE_CHARS] + "*" * hidden_count
 
 
@@ -117,7 +150,8 @@ def print_findings(findings: list[Finding], ids: list[str] | None = None) -> Non
 
     # The widest entry in each column decides that column's width.
     # `max(...)` here goes through every item and keeps the biggest length.
-    location_width = max(len(location) for location in locations)
+    # (`min` caps the padding, so one very long path can't widen every line.)
+    location_width = min(max(len(location) for location in locations), MAX_LOCATION_WIDTH)
     rule_width = max(len(finding.rule_name) for finding in findings)
 
     # The secret itself is ALWAYS passed through mask() first: the tool
@@ -259,6 +293,9 @@ def review_findings(findings: list[Finding], ids: list[str]) -> dict[str, str] |
 
         # `reason or DEFAULT_REVIEW_REASON` uses the typed reason, unless it's
         # empty, in which case it uses the default.
+        # A terminal can hand us "half characters" that can't be saved as
+        # UTF-8. `errors="replace"` turns any of those into "?".
+        reason = reason.encode("utf-8", errors="replace").decode("utf-8")
         dismissed[this_id] = reason or DEFAULT_REVIEW_REASON
 
         # Tell the user if this answer also covers other copies of the same key.
@@ -282,9 +319,47 @@ def config_error(message: str) -> int:
     is wrong with how secretscan was set up", never "secrets found" (1).
     """
     # `file=sys.stderr` sends the message to the error output, like
-    # argparse does with its own errors.
-    print(f"secretscan: error: {display(message)}", file=sys.stderr)
+    # argparse does with its own errors. If even that output is closed,
+    # give up on the message but still return 2: the exit code matters most.
+    try:
+        print(f"secretscan: error: {display(message)}", file=sys.stderr)
+        sys.stderr.flush()
+    except (OSError, ValueError):
+        silence_output()
     return 2
+
+
+def silence_output() -> None:
+    """Point stdout and stderr at "nowhere" after one of them breaks.
+
+    When a program's output is closed (for example `secretscan | head -1`
+    after head exits), every later write fails, including the automatic
+    flush Python does on exit, which would print a traceback and change the
+    exit code. `os.devnull` is a special file that throws away whatever is
+    written to it; `os.dup2` makes each stream's descriptor point there.
+    We don't know which stream broke, so both are redirected.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            with open(os.devnull, "w") as sink:
+                os.dup2(sink.fileno(), stream.fileno())
+        except (OSError, ValueError):
+            pass
+
+
+class SafeArgumentParser(argparse.ArgumentParser):
+    """An argparse parser whose error messages go through display().
+
+    argparse repeats what the user typed in its errors (e.g. "unrecognized
+    arguments: ..."). That text could contain a key or terminal control
+    codes, so it gets the same masking and escaping as everything else.
+    """
+
+    def error(self, message: str) -> None:
+        # `self.exit` prints the message to stderr and exits with code 2,
+        # just like the normal argparse error does.
+        self.print_usage(sys.stderr)
+        self.exit(2, f"{self.prog}: error: {display(message)}\n")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -293,7 +368,7 @@ def build_parser() -> argparse.ArgumentParser:
     A "parser" is the object that knows which options exist and turns
     what the user typed into Python values we can use.
     """
-    parser = argparse.ArgumentParser(
+    parser = SafeArgumentParser(
         # The program name shown in help and error messages.
         prog="secretscan",
         # The sentence shown at the top of `secretscan --help`.
@@ -376,6 +451,37 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def file_changed(file: Path, before: tuple[int, int]) -> bool:
+    """True if `file`'s modification time or size differ from `before`, or it's gone."""
+    try:
+        status = file.stat()
+    except OSError:
+        return True
+    return (status.st_mtime_ns, status.st_size) != before
+
+
+def save_review_elsewhere(dismissed: dict[str, str]) -> int:
+    """Keep review answers when the real ignore file couldn't be written.
+
+    First try a new private temporary folder. If even that fails, print the
+    entries so the user can paste them in by hand. They're only IDs and the
+    user's own reasons, never secrets, so printing them is safe.
+    """
+    try:
+        recovery = Path(tempfile.mkdtemp(prefix="secretscan-review-")) / IGNORE_FILE_NAME
+        save_ignore_file(recovery, dismissed)
+    except (OSError, UnicodeError):
+        entries = [{"id": entry_id, "reason": reason} for entry_id, reason in dismissed.items()]
+        try:
+            print("Could not save your answers anywhere. Add these entries to the "
+                  "\"findings\" list of your ignore file:", file=sys.stderr)
+            print(json.dumps(entries, indent=2), file=sys.stderr)
+        except (OSError, ValueError):
+            silence_output()
+        return config_error("could not save review")
+    return config_error(f"could not save review; answers preserved in {recovery}")
+
+
 def run(argv: list[str] | None = None) -> int:
     """Entry point for the `secretscan` command.
 
@@ -403,7 +509,8 @@ def run(argv: list[str] | None = None) -> int:
     # Code 2 is the standard argparse code for "you used the command wrong",
     # which keeps it separate from 1 ("secrets found").
     if not path.exists():
-        parser.error(f"path not found: {display(path)}")
+        # (parser.error masks and escapes the message itself.)
+        parser.error(f"path not found: {path}")
 
     # --review saves answers to the ignore file, so it can't be combined with
     # "use no ignore file". And it asks questions, so a person must be there
@@ -435,7 +542,10 @@ def run(argv: list[str] | None = None) -> int:
         # Otherwise use .secretscanignore in the scan root, if it's there.
         # A missing default ignore file is normal: most projects won't have one.
         default = root / IGNORE_FILE_NAME
-        if default.exists():
+        # `is_symlink()` catches a broken shortcut, which `exists()` reports
+        # as missing. Loading it then fails with a clear error instead of
+        # silently scanning without the user's ignore file.
+        if default.exists() or default.is_symlink():
             ignore_path = default
         else:
             ignore_path = None
@@ -457,14 +567,27 @@ def run(argv: list[str] | None = None) -> int:
     # another (unlike `append`, which would add the whole list as one item).
     candidates = []
     issues: list[ScanIssue] = []
+    # Size and modification time of each scanned file, so --review can tell
+    # if files changed while the user was answering questions.
+    snapshot: dict[Path, tuple[int, int]] = {}
+    # Other .secretscanignore files found while scanning. Only the one in
+    # the project root is used, so the user is told about the rest.
+    unused_ignore_files = []
     for file in find_files(path, issues):
-        # Don't scan the ignore file itself: it's settings, not code.
+        # When scanning a folder, don't scan the active ignore file: it's
+        # settings, not code. But if the user names it directly, scan it:
+        # skipping it would print "No secrets found." without checking it.
         # `resolve()` turns both into full, absolute paths, so the same
         # file written two different ways still compares as equal.
         if ignore_path is not None and file.resolve() == ignore_path.resolve():
-            continue
+            if path.is_dir():
+                continue
+        elif file.name == IGNORE_FILE_NAME:
+            unused_ignore_files.append(file)
         try:
             candidates.extend(scan_file(file, include_inline=True))
+            status = file.stat()
+            snapshot[file] = (status.st_mtime_ns, status.st_size)
         except (OSError, UnicodeError):
             issues.append(ScanIssue(str(file), "could not read file", True))
 
@@ -523,16 +646,20 @@ def run(argv: list[str] | None = None) -> int:
             # the scan root if there isn't one yet.
             if ignore_path is None:
                 ignore_path = root / IGNORE_FILE_NAME
-            # `update` adds the new entries to the existing ones.
-            ignored_ids.update(dismissed)
+            # The review may have taken a while, and someone (or another
+            # program) may have edited the ignore file meanwhile. So read it
+            # again NOW and add this review's answers to that latest version,
+            # instead of overwriting it with the copy loaded at the start.
             try:
-                save_ignore_file(ignore_path, ignored_ids)
-            except OSError:
-                # Permissions can change after the preflight. Keep the answers
-                # in a private temporary directory instead of losing the review.
-                recovery = Path(tempfile.mkdtemp(prefix="secretscan-review-")) / IGNORE_FILE_NAME
-                save_ignore_file(recovery, ignored_ids)
-                return config_error(f"could not save review; answers preserved in {recovery}")
+                latest = {}
+                if ignore_path.exists() or ignore_path.is_symlink():
+                    latest = load_ignore_file(ignore_path)
+                # `update` adds the new entries to the existing ones.
+                latest.update(dismissed)
+                save_ignore_file(ignore_path, latest)
+            except (OSError, UnicodeError, IgnoreFileError):
+                return save_review_elsewhere(dismissed)
+            ignored_ids.update(dismissed)
             print(f"Added {plural(len(dismissed), 'finding')} to {display(ignore_path)}.")
             print()
 
@@ -547,6 +674,12 @@ def run(argv: list[str] | None = None) -> int:
                     kept_ids.append(this_id)
             reportable = kept
             reportable_ids = kept_ids
+
+    # If files changed while the user was answering, the findings above
+    # describe the OLD contents. Don't claim a result for the new ones.
+    if args.review and any(file_changed(file, before) for file, before in snapshot.items()):
+        return config_error("files changed during the review, so these results "
+                            "may be out of date; run secretscan again")
 
     # Stage 5: print the findings (if there are any), then a blank line to
     # separate them from the summary. print_findings can't handle an empty
@@ -575,6 +708,10 @@ def run(argv: list[str] | None = None) -> int:
             f"Ignored {plural(ignored_count, 'finding')} listed in {display(ignore_path)} "
             "(use --no-ignore to see)."
         )
+
+    for extra in unused_ignore_files:
+        print(f"Notice: {display(extra)} is not used; only "
+              f"{display(Path(root) / IGNORE_FILE_NAME)} applies to this scan.", file=sys.stderr)
 
     if inline_count:
         print(f"Ignored {plural(inline_count, 'inline finding')} "
@@ -609,12 +746,8 @@ def main(argv: list[str] | None = None) -> int:
         sys.stdout.flush()
         return result
     except BrokenPipeError:
-        # Redirect the descriptor so shutdown does not retry the broken pipe.
-        try:
-            with open(os.devnull, "w") as sink:
-                os.dup2(sink.fileno(), sys.stdout.fileno())
-        except (OSError, ValueError):
-            pass
+        # Redirect both streams so shutdown does not retry the broken pipe.
+        silence_output()
         return 2
     except KeyboardInterrupt:
         return config_error("scan interrupted")

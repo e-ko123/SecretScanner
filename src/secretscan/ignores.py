@@ -41,7 +41,11 @@ import tempfile
 from pathlib import Path
 
 # The type that holds one result (see scanner.py).
-from secretscan.scanner import Finding
+from secretscan.scanner import Finding, read_regular_file
+
+# The biggest ignore file we'll read: 1 MB, the same limit as source files.
+# A real one is a few kilobytes; anything bigger is a mistake or an attack.
+MAX_IGNORE_FILE_SIZE = 1_000_000
 
 # The name of the ignore file we look for in the scan root by default.
 IGNORE_FILE_NAME = ".secretscanignore"
@@ -83,10 +87,17 @@ def relative_path(file: str | Path, root: Path) -> str:
     gives "src/app.py". Using the relative path (not the full one) means
     the same project gives the same IDs wherever it's checked out.
     """
+    # Use the REAL location of the file's folder (`resolve()` follows any
+    # folder shortcuts), and of the root. Otherwise reaching the same project
+    # through a shortcut, or through macOS's /var vs /private/var, would give
+    # different paths and so different IDs. Only the folder is resolved, not
+    # the file name itself, so a file that is a shortcut keeps its own name.
+    file = Path(file)
+    real_file = file.parent.resolve() / file.name
     # `os.path.relpath` works out the path from `root` to `file`.
     # `as_posix()` writes it with "/" between folders, even on Windows
     # (which uses "\"), so IDs are the same on every operating system.
-    return Path(os.path.relpath(file, root)).as_posix()
+    return Path(os.path.relpath(real_file, Path(root).resolve())).as_posix()
 
 
 def fingerprint(rule_id: str, path: str, candidate: str) -> str:
@@ -145,13 +156,20 @@ def load_ignore_file(path: Path) -> dict[str, str]:
     ignore file is never treated as an empty one: that could quietly hide
     (or quietly un-hide) findings the user made decisions about.
     """
-    # Read the file as text.
+    # Read the file safely: one open, normal files only (a named pipe would
+    # wait forever, and something like /dev/zero never ends), and at most
+    # MAX_IGNORE_FILE_SIZE bytes (see read_regular_file in scanner.py).
     try:
-        text = path.read_text(encoding="utf-8-sig")
+        data = read_regular_file(path, MAX_IGNORE_FILE_SIZE)
+    except OSError:
+        raise IgnoreFileError("could not be read (it must be a regular file)")
+    if len(data) > MAX_IGNORE_FILE_SIZE:
+        raise IgnoreFileError("is larger than 1 MB")
+    # "utf-8-sig" also accepts the invisible marker Windows Notepad adds.
+    try:
+        text = data.decode("utf-8-sig")
     except UnicodeDecodeError:
         raise IgnoreFileError("not valid UTF-8 text")
-    except OSError:
-        raise IgnoreFileError("could not be read")
 
     # Parse the JSON. If it's broken, say where, but not what's there.
     # `json.JSONDecodeError` knows the line and column of the problem.
@@ -219,6 +237,13 @@ def load_ignore_file(path: Path) -> dict[str, str]:
         reason = entry["reason"]
         if not isinstance(reason, str) or not reason.strip():
             raise IgnoreFileError(f"{where}.reason must be a non-empty string")
+        # JSON can spell out "half characters" (like \ud800) that aren't valid
+        # text. Accepting one would make the next save crash, so reject it
+        # now. Encoding to UTF-8 is the test: it fails on such characters.
+        try:
+            reason.encode("utf-8")
+        except UnicodeEncodeError:
+            raise IgnoreFileError(f"{where}.reason contains invalid Unicode")
 
         # The same ID listed twice is almost certainly a copy-paste mistake.
         if entry_id in ignored:
@@ -259,15 +284,21 @@ def save_ignore_file(path: Path, ignored: dict[str, str]) -> None:
     # `os.replace` swaps in one step: the ignore file is always either the
     # complete old version or the complete new one, never half-written,
     # even if the program is stopped in the middle of saving.
+    # If the ignore file is a shortcut (symlink) to a shared file, update
+    # the shared file itself. Replacing the shortcut with a normal file would
+    # silently split one shared ignore file into separate copies.
+    # `os.path.realpath` follows shortcuts to the real location.
+    target = Path(os.path.realpath(path))
+
     # Use a unique name, and remove it even after Ctrl-C or a failed rename.
     temporary = None
     try:
         with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8",
-                                         dir=path.parent, prefix=path.name + ".",
+                                         dir=target.parent, prefix=target.name + ".",
                                          suffix=".tmp", delete=False) as file:
             temporary = Path(file.name)
             file.write(text)
-        os.replace(temporary, path)
+        os.replace(temporary, target)
     finally:
         if temporary is not None:
             temporary.unlink(missing_ok=True)
