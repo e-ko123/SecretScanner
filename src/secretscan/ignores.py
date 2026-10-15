@@ -12,9 +12,10 @@ file called .secretscanignore:
       ]
     }
 
-This module does two jobs:
+This module does three jobs:
 1. fingerprint: give each finding a stable ID.
 2. load_ignore_file: read and strictly check the ignore file.
+3. save_ignore_file: write it back, after `secretscan --review` adds entries.
 """
 
 # Lets us write type hints like `dict[str, str]` on Python 3.9 (see cli.py).
@@ -216,3 +217,38 @@ def load_ignore_file(path: Path) -> dict[str, str]:
         ignored[entry_id] = reason
 
     return ignored
+
+
+# ---------------------------------------------------------------------------
+# 3. Saving the ignore file
+# ---------------------------------------------------------------------------
+
+def save_ignore_file(path: Path, ignored: dict[str, str]) -> None:
+    """Write `ignored` ({id: reason}) to `path` in the ignore-file format.
+
+    Used by `secretscan --review`. Entries are written in the order they
+    are in the dictionary (Python dictionaries remember insertion order), so
+    entries already in the file stay where they were, and new ones go at
+    the end. Any custom spacing in the old file is not kept.
+    """
+    data = {
+        "version": IGNORE_FILE_VERSION,
+        # One {"id": ..., "reason": ...} object per entry.
+        # `.items()` gives each (key, value) pair of a dictionary.
+        "findings": [
+            {"id": entry_id, "reason": reason} for entry_id, reason in ignored.items()
+        ],
+    }
+
+    # `indent=2` spreads the JSON over several lines, indented by 2 spaces,
+    # so it's easy for people to read and review in a pull request.
+    # The "\n" adds a final newline, which most editors and git expect.
+    text = json.dumps(data, indent=2, ensure_ascii=False) + "\n"
+
+    # Write to a temporary file first, then swap it into place.
+    # `os.replace` swaps in one step: the ignore file is always either the
+    # complete old version or the complete new one, never half-written,
+    # even if the program is stopped in the middle of saving.
+    temporary = path.with_name(path.name + ".tmp")
+    temporary.write_text(text, encoding="utf-8")
+    os.replace(temporary, path)

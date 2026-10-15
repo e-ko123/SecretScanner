@@ -36,6 +36,7 @@ from secretscan.ignores import (
     IgnoreFileError,
     finding_id,
     load_ignore_file,
+    save_ignore_file,
 )
 
 # `find_files` works out which files to scan; `scan_file` scans one file.
@@ -160,6 +161,96 @@ def summary(findings: list[Finding], anything_hidden: bool = False) -> str:
     )
 
 
+# The reason saved in the ignore file when the user dismisses a finding
+# during --review but doesn't type a reason of their own.
+DEFAULT_REVIEW_REASON = "Marked as not a secret during secretscan --review"
+
+
+def is_interactive() -> bool:
+    """Return True if a person is typing at a terminal.
+
+    `isatty()` ("is this a terminal?") is False when input comes from a file,
+    a pipe, CI, or a git hook, where nobody can answer questions. --review
+    refuses to run then, instead of waiting forever for an answer.
+    (It's a separate function so tests can pretend to be a terminal.)
+    """
+    return sys.stdin.isatty()
+
+
+def review_findings(findings: list[Finding], ids: list[str]) -> dict[str, str] | None:
+    """Ask the user, one finding at a time, whether to ignore it from now on.
+
+    `ids[0]` is the ID of `findings[0]`, and so on.
+
+    Returns a dictionary {id: reason} of the findings the user chose to
+    ignore (possibly empty), or None if they cancelled with Ctrl-C, in
+    which case nothing should be saved.
+
+    Answers:
+        y        ignore this finding from now on (then asks for a reason)
+        Enter    keep reporting it. This is the default, so pressing Enter
+                 by accident never hides a possible secret.
+        q        stop reviewing; the "y" answers given so far are kept
+    """
+    dismissed: dict[str, str] = {}
+    total = len(findings)
+
+    print(
+        f"Reviewing {plural(total, 'finding')}. Open each file at the line "
+        "shown to check it."
+    )
+    print("Answer y to ignore a finding from now on, Enter to keep it, q to stop.")
+
+    # `zip` pairs each finding with its ID; `enumerate(..., start=1)` numbers
+    # the pairs 1, 2, 3... for the "[2/5]" counter.
+    for number, (finding, this_id) in enumerate(zip(findings, ids), start=1):
+        # The same key in the same file shares one ID (see ignores.py), so
+        # if the user already said yes to an earlier copy, this one is
+        # covered too. Don't ask twice.
+        if this_id in dismissed:
+            continue
+
+        print()
+        # Same details as the normal report. The secret is masked here too.
+        print(
+            f"[{number}/{total}] {finding.path}:{finding.line_number}   "
+            f"{finding.rule_name}   {mask(finding.secret)}"
+        )
+
+        # `input(prompt)` prints the prompt and waits for the user to type a
+        # line and press Enter. Pressing Ctrl-C raises KeyboardInterrupt,
+        # and closing the input (Ctrl-D) raises EOFError. Either way, the
+        # user wants out, so cancel without saving anything: they may have
+        # pressed it because they just answered "y" by mistake.
+        try:
+            answer = input("Ignore this finding from now on? [y/N/q] ").strip().lower()
+            if answer in ("q", "quit"):
+                break
+            if answer not in ("y", "yes"):
+                # Anything other than yes (including a typo) means "keep".
+                continue
+            reason = input("Reason (press Enter to use a default): ").strip()
+        except (KeyboardInterrupt, EOFError):
+            return None
+
+        # `reason or DEFAULT_REVIEW_REASON` uses the typed reason, unless it's
+        # empty, in which case it uses the default.
+        dismissed[this_id] = reason or DEFAULT_REVIEW_REASON
+
+        # Tell the user if this answer also covers other copies of the same key.
+        # `ids.count(this_id)` counts how many findings share this ID.
+        # (plural() would say "copys", so the word is picked by hand here.)
+        other_copies = ids.count(this_id) - 1
+        if other_copies:
+            word = "copy" if other_copies == 1 else "copies"
+            print(
+                f"  This also covers {other_copies} other {word} of the "
+                "same key in this file."
+            )
+
+    return dismissed
+
+
 def config_error(message: str) -> int:
     """Print a configuration error and return exit code 2.
 
@@ -214,6 +305,14 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="show each finding's ID (for dismissing it in a "
         f"{IGNORE_FILE_NAME} file)",
+    )
+
+    # Go through the findings one by one, asking whether to ignore each one.
+    parser.add_argument(
+        "--review",
+        action="store_true",
+        help="go through the findings one by one and choose which to ignore "
+        f"from now on (answers are saved to {IGNORE_FILE_NAME})",
     )
 
     # --ignore-file and --no-ignore contradict each other ("use this ignore
@@ -276,6 +375,16 @@ def main(argv: list[str] | None = None) -> int:
     # which keeps it separate from 1 ("secrets found").
     if not path.exists():
         parser.error(f"path not found: {path}")
+
+    # --review saves answers to the ignore file, so it can't be combined with
+    # "use no ignore file". And it asks questions, so a person must be there
+    # to answer them.
+    if args.review and args.no_ignore:
+        parser.error("--review can't be used with --no-ignore "
+                     "(there'd be no ignore file to save your answers to)")
+    if args.review and not is_interactive():
+        parser.error("--review needs a terminal to ask questions in; "
+                     "it can't run in CI, a git hook, or with piped input")
 
     # The "scan root" is the folder that finding IDs are relative to, and
     # where we look for the ignore file. When scanning a folder, it's that
@@ -352,6 +461,40 @@ def main(argv: list[str] | None = None) -> int:
         else:
             reportable.append(finding)
             reportable_ids.append(this_id)
+
+    # Stage 4b (only with --review): ask about each remaining finding, save
+    # the "ignore it" answers, and treat those findings as ignored from here
+    # on, exactly as if they'd been in the ignore file all along.
+    if args.review and reportable:
+        dismissed = review_findings(reportable, reportable_ids)
+        print()
+
+        if dismissed is None:
+            # Ctrl-C: save nothing, and report everything as usual below.
+            print("Review cancelled. Nothing was saved.")
+            print()
+        elif dismissed:
+            # Save to the ignore file in use, or create .secretscanignore in
+            # the scan root if there isn't one yet.
+            if ignore_path is None:
+                ignore_path = root / IGNORE_FILE_NAME
+            # `update` adds the new entries to the existing ones.
+            ignored_ids.update(dismissed)
+            save_ignore_file(ignore_path, ignored_ids)
+            print(f"Added {plural(len(dismissed), 'finding')} to {ignore_path}.")
+            print()
+
+            # Rebuild the reportable lists without the dismissed findings.
+            kept = []
+            kept_ids = []
+            for finding, this_id in zip(reportable, reportable_ids):
+                if this_id in dismissed:
+                    ignored_count += 1
+                else:
+                    kept.append(finding)
+                    kept_ids.append(this_id)
+            reportable = kept
+            reportable_ids = kept_ids
 
     # Stage 5: print the findings (if there are any), then a blank line to
     # separate them from the summary. print_findings can't handle an empty

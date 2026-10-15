@@ -11,10 +11,13 @@ import json
 
 import pytest
 
+# `cli` (the whole module) lets the --review tests swap out is_interactive.
+import secretscan.cli as cli
+
 # Import the function we want to test. This works because the project is
 # installed (`pip install -e ".[dev]"`), so Python can find the package.
 from secretscan.cli import main, mask, summary
-from secretscan.ignores import finding_id
+from secretscan.ignores import finding_id, load_ignore_file
 from secretscan.scanner import Finding, scan_file
 
 # A fake AWS key in the right shape: "AKIA" + 16 varied capital letters and
@@ -456,3 +459,160 @@ def test_explicit_ignore_file_inside_the_project_is_not_scanned(tmp_path, capsys
     }))
 
     assert main([str(tmp_path), "--ignore-file", str(ignores)]) == 0
+
+
+# --- --review --------------------------------------------------------------
+# --review asks questions with input(). In tests nobody is typing, so we use
+# `monkeypatch` to swap in pretend answers, and to pretend we're in a terminal.
+
+
+def answer_with(monkeypatch, answers):
+    """Make input() return each of `answers` in turn, and pretend to be a terminal."""
+    # `iter` turns the list into something that hands out one item at a
+    # time; `next(...)` takes the next one.
+    remaining = iter(answers)
+    monkeypatch.setattr("builtins.input", lambda prompt="": next(remaining))
+    monkeypatch.setattr(cli, "is_interactive", lambda: True)
+
+
+def test_review_y_saves_the_finding_and_hides_it(tmp_path, monkeypatch, capsys):
+    (tmp_path / "config.py").write_text(f"KEY = '{FAKE_AWS_KEY}'\n")
+    answer_with(monkeypatch, ["y", "Fake key for docs"])
+
+    # Nothing is left to report after the "y", so the exit code is 0.
+    assert main([str(tmp_path), "--review"]) == 0
+
+    # The answer was saved, with the reason typed...
+    saved = load_ignore_file(tmp_path / ".secretscanignore")
+    assert list(saved.values()) == ["Fake key for docs"]
+    # ...and a normal scan afterwards stays quiet without asking anything.
+    capsys.readouterr()
+    assert main([str(tmp_path)]) == 0
+
+
+def test_review_uses_a_default_reason_when_left_blank(tmp_path, monkeypatch):
+    (tmp_path / "config.py").write_text(f"KEY = '{FAKE_AWS_KEY}'\n")
+    answer_with(monkeypatch, ["y", ""])
+
+    main([str(tmp_path), "--review"])
+
+    saved = load_ignore_file(tmp_path / ".secretscanignore")
+    assert list(saved.values()) == [cli.DEFAULT_REVIEW_REASON]
+
+
+def test_review_enter_keeps_the_finding(tmp_path, monkeypatch, capsys):
+    # Pressing Enter (an empty answer) means "no": keep reporting it.
+    (tmp_path / "config.py").write_text(f"KEY = '{FAKE_AWS_KEY}'\n")
+    answer_with(monkeypatch, [""])
+
+    assert main([str(tmp_path), "--review"]) == 1
+    # Nothing to save, so no ignore file is created.
+    assert not (tmp_path / ".secretscanignore").exists()
+
+
+def test_review_q_stops_but_keeps_earlier_answers(tmp_path, monkeypatch, capsys):
+    (tmp_path / "a.py").write_text(f"KEY = '{FAKE_AWS_KEY}'\n")
+    (tmp_path / "b.py").write_text(f"KEY = '{OTHER_AWS_KEY}'\n")
+    answer_with(monkeypatch, ["y", "", "q"])
+
+    # a.py was dismissed; b.py was never answered, so it's still reported.
+    assert main([str(tmp_path), "--review"]) == 1
+    output = capsys.readouterr().out
+    assert "Found 1 possible secret in 1 file." in output
+    assert "Ignored 1 finding" in output
+    assert len(load_ignore_file(tmp_path / ".secretscanignore")) == 1
+
+
+def test_review_ctrl_c_saves_nothing(tmp_path, monkeypatch, capsys):
+    (tmp_path / "a.py").write_text(f"KEY = '{FAKE_AWS_KEY}'\n")
+    (tmp_path / "b.py").write_text(f"KEY = '{OTHER_AWS_KEY}'\n")
+
+    # Answer "y" to the first, then press Ctrl-C at the second question.
+    answers = iter(["y", "reason"])
+
+    def fake_input(prompt=""):
+        try:
+            return next(answers)
+        except StopIteration:
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr("builtins.input", fake_input)
+    monkeypatch.setattr(cli, "is_interactive", lambda: True)
+
+    assert main([str(tmp_path), "--review"]) == 1
+    assert "Review cancelled. Nothing was saved." in capsys.readouterr().out
+    assert not (tmp_path / ".secretscanignore").exists()
+
+
+def test_review_adds_to_an_existing_ignore_file(tmp_path, monkeypatch, capsys):
+    (tmp_path / "a.py").write_text(f"KEY = '{FAKE_AWS_KEY}'\n")
+    write_ignore_file(tmp_path / ".secretscanignore", ["b" * 64])
+    answer_with(monkeypatch, ["y", "new one"])
+
+    main([str(tmp_path), "--review"])
+
+    saved = load_ignore_file(tmp_path / ".secretscanignore")
+    # The old entry is still there, first, and the new one was added after it.
+    assert list(saved)[0] == "b" * 64
+    assert list(saved.values())[1] == "new one"
+
+
+def test_review_saves_to_the_chosen_ignore_file(tmp_path, monkeypatch, capsys):
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "a.py").write_text(f"KEY = '{FAKE_AWS_KEY}'\n")
+    chosen = tmp_path / "my-ignores.json"
+    write_ignore_file(chosen, [])
+    answer_with(monkeypatch, ["y", ""])
+
+    main([str(project), "--review", "--ignore-file", str(chosen)])
+
+    assert len(load_ignore_file(chosen)) == 1
+    assert not (project / ".secretscanignore").exists()
+
+
+def test_review_asks_once_for_repeated_key_in_one_file(tmp_path, monkeypatch, capsys):
+    # The same key twice in one file shares one ID, so one "y" covers both.
+    # Only two answers are given: asking a second time would run out.
+    (tmp_path / "a.py").write_text(f"A = '{FAKE_AWS_KEY}'\nB = '{FAKE_AWS_KEY}'\n")
+    answer_with(monkeypatch, ["y", ""])
+
+    assert main([str(tmp_path), "--review"]) == 0
+    assert "This also covers 1 other copy" in capsys.readouterr().out
+
+
+def test_review_output_is_masked(tmp_path, monkeypatch, capsys):
+    (tmp_path / "a.py").write_text(f"KEY = '{FAKE_AWS_KEY}'\n")
+    answer_with(monkeypatch, [""])
+
+    main([str(tmp_path), "--review"])
+
+    output = capsys.readouterr().out
+    assert "[1/1]" in output
+    assert FAKE_AWS_KEY not in output
+
+
+def test_review_with_nothing_found_asks_nothing(tmp_path, monkeypatch, capsys):
+    (tmp_path / "a.py").write_text("x = 1\n")
+    answer_with(monkeypatch, [])  # any question would fail: no answers left
+
+    assert main([str(tmp_path), "--review"]) == 0
+    assert capsys.readouterr().out == "No secrets found.\n"
+
+
+def test_review_refuses_without_a_terminal(tmp_path, capsys):
+    # In tests, input isn't a real terminal, just like in CI or a git hook.
+    with pytest.raises(SystemExit) as exit_info:
+        main([str(tmp_path), "--review"])
+
+    assert exit_info.value.code == 2
+    assert "needs a terminal" in capsys.readouterr().err
+
+
+def test_review_and_no_ignore_together_are_rejected(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(cli, "is_interactive", lambda: True)
+
+    with pytest.raises(SystemExit) as exit_info:
+        main([str(tmp_path), "--review", "--no-ignore"])
+
+    assert exit_info.value.code == 2

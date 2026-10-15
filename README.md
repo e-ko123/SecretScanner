@@ -189,6 +189,7 @@ If nothing is left to report but some matches were hidden, it says **"No reporta
 |---|---|
 | `path` | The file or folder to scan (default: the current folder) |
 | `--include-placeholders` | Also report recognized placeholder keys instead of hiding them |
+| `--review` | Go through the findings one by one and choose which to ignore from now on |
 | `--show-ids` | Show each finding's ID, for dismissing it in `.secretscanignore` |
 | `--ignore-file PATH` | Use this ignore file instead of `.secretscanignore` in the scanned folder |
 | `--no-ignore` | Don't use any ignore file. Can't be combined with `--ignore-file` |
@@ -231,8 +232,7 @@ How to fix this:
   2. Run `git add` on the file again.
   3. Commit again.
 
-If this is a false alarm, dismiss it in .secretscanignore
-(run `secretscan --show-ids` to get its ID).
+If this is a false alarm, run `secretscan --review` to dismiss it.
 ```
 
 **If a pre-commit hook already exists**, `install-hook` won't touch it. It prints a message and stops, so it never destroys someone's existing setup by accident. To replace the existing hook anyway:
@@ -308,7 +308,33 @@ docs/setup.md:4   AWS Access Key ID   AKIA****************   (recognized placeho
 
 ### 2. Dismiss a reviewed finding in `.secretscanignore`
 
-For anything else that you've checked and know is harmless, like a realistic-looking fake key in a test, you can dismiss that one finding **without editing the file it's in**:
+For anything else that you've checked and know is harmless, like a realistic-looking fake key in a test, you can dismiss that one finding **without editing the file it's in**.
+
+**The easy way: `--review`.** secretscan goes through the findings one at a time and asks about each:
+
+```text
+$ secretscan --review
+Reviewing 2 findings. Open each file at the line shown to check it.
+Answer y to ignore a finding from now on, Enter to keep it, q to stop.
+
+[1/2] tests/test_api.py:12   AWS Access Key ID   AKIA****************
+Ignore this finding from now on? [y/N/q] y
+Reason (press Enter to use a default): Fake key used in API client tests
+
+[2/2] src/config.py:3   GitHub Token   ghp_************************************
+Ignore this finding from now on? [y/N/q]
+
+Added 1 finding to .secretscanignore.
+```
+
+- **y** ignores the finding from now on and asks for a short reason (press Enter to use a default one). The answer is saved to `.secretscanignore`, which is created if it doesn't exist yet.
+- **Enter** (or anything other than `y`) keeps reporting it. "No" is the default, so a stray keypress never hides a possible secret.
+- **q** stops reviewing. Answers you already gave are saved.
+- **Ctrl-C** cancels the whole review and saves nothing, in case you just answered `y` by mistake.
+
+The secret is masked in the questions too, so open the file at the line shown to see it. `--review` only runs in a terminal: in CI, a git hook, or with piped input, nobody can answer, so it stops with an error instead of waiting forever. It can't be combined with `--no-ignore`, and with `--ignore-file PATH` answers are saved to that file instead.
+
+**The manual way.** You can also edit the ignore file yourself:
 
 1. Run `secretscan` as usual.
 2. Run it again with `--show-ids` to see each finding's ID (a long string of letters and digits):
@@ -334,7 +360,7 @@ For anything else that you've checked and know is harmless, like a realistic-loo
 
 5. Run `secretscan` again. The finding is gone, and the summary says how many were ignored.
 
-There's deliberately no command that adds *every* current finding to the ignore file in one go: a first scan can contain real leaked keys, and each one deserves a look.
+There's deliberately no "ignore all" option, in `--review` or anywhere else: a first scan can contain real leaked keys, and each one deserves a look.
 
 **The ignore file format** is strict, so typos are caught instead of silently doing nothing:
 
@@ -523,7 +549,7 @@ Try `python3 -m pip install .` instead.
 Make sure you ran `secretscan install-hook` *inside* the repository you want to protect, and check that `.git/hooks/pre-commit` exists. The hook calls the `secretscan` command, so it must be installed where git can find it. Installing with `pipx` is the most reliable option.
 
 **It flagged something that isn't a secret.**
-Check it carefully first. If it really is harmless, run `secretscan --show-ids` and add its ID to `.secretscanignore` (see [Handling false alarms](#handling-false-alarms)), or add a `secretscan:ignore` comment to that line. If it happens often for the same kind of value, please open an issue.
+Check it carefully first. If it really is harmless, run `secretscan --review` and answer `y` for it, or add its ID to `.secretscanignore` by hand (see [Handling false alarms](#handling-false-alarms)), or add a `secretscan:ignore` comment to that line. If it happens often for the same kind of value, please open an issue.
 
 **`secretscan: error: ignore file ...`**
 The ignore file is broken or doesn't match the expected format, and the message says which part. Fix it, or run with `--no-ignore` to scan without it.

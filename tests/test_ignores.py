@@ -15,6 +15,7 @@ from secretscan.ignores import (
     fingerprint,
     load_ignore_file,
     relative_path,
+    save_ignore_file,
 )
 from secretscan.scanner import scan_file
 
@@ -182,3 +183,18 @@ def test_invalid_json_is_rejected_without_echoing_contents(tmp_path):
     assert "not valid JSON" in message
     assert "line 1" in message
     assert FAKE_AWS_KEY not in message
+
+
+# --- save_ignore_file ------------------------------------------------------
+
+def test_saved_ignore_file_loads_back_the_same(tmp_path):
+    path = tmp_path / ".secretscanignore"
+    entries = {"a" * 64: "first", "b" * 64: "second"}
+
+    save_ignore_file(path, entries)
+
+    # Whatever we save must pass our own strict checks, in the same order.
+    assert load_ignore_file(path) == entries
+    assert list(load_ignore_file(path)) == ["a" * 64, "b" * 64]
+    # The temporary file used while saving is gone afterwards.
+    assert list(tmp_path.iterdir()) == [path]
