@@ -209,3 +209,57 @@ def test_scan_file_returns_empty_list_for_clean_file(tmp_path):
     file.write_text("print('nothing to see here')\n")
 
     assert scan_file(file) == []
+
+
+# --- placeholders ----------------------------------------------------------
+# The scanner keeps every match but marks recognized placeholders, so the
+# command-line tool can hide them (and say how many it hid).
+
+PLACEHOLDER_AWS_KEY = "AKIA" + "X" * 16
+
+
+def test_scan_file_marks_placeholder_but_keeps_it(tmp_path):
+    file = tmp_path / "docs.py"
+    file.write_text(f"KEY = '{PLACEHOLDER_AWS_KEY}'\n")
+
+    findings = scan_file(file)
+
+    assert len(findings) == 1
+    assert findings[0].placeholder_reason == "token body is all 'X' filler"
+    assert findings[0].rule_id == "aws-access-key-id"
+
+
+def test_placeholder_and_real_key_on_one_line_are_judged_separately(tmp_path):
+    file = tmp_path / "config.py"
+    file.write_text(f"keys = ['{PLACEHOLDER_AWS_KEY}', '{FAKE_AWS_KEY}']\n")
+
+    findings = scan_file(file)
+
+    # Both are found; only the all-X one is marked as a placeholder.
+    assert [f.placeholder_reason is None for f in findings] == [False, True]
+    assert findings[1].secret == FAKE_AWS_KEY
+
+
+def test_real_looking_key_in_a_comment_is_not_a_placeholder(tmp_path):
+    # A commented-out key is still in the file, so it's still a leak.
+    file = tmp_path / "config.py"
+    file.write_text(f"# AWS_KEY = '{FAKE_AWS_KEY}'  # old key\n")
+
+    findings = scan_file(file)
+
+    assert len(findings) == 1
+    assert findings[0].placeholder_reason is None
+
+
+def test_words_like_example_nearby_do_not_make_a_placeholder(tmp_path):
+    # Surrounding text is never treated as proof that a key is fake.
+    file = tmp_path / "README.md"
+    file.write_text(
+        f"Example: {FAKE_AWS_KEY}\n"
+        f"fake_key = '{FAKE_AWS_KEY}'  # placeholder, demo only\n"
+    )
+
+    findings = scan_file(file)
+
+    assert len(findings) == 2
+    assert all(f.placeholder_reason is None for f in findings)

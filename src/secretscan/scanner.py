@@ -4,6 +4,11 @@ This file has two jobs:
 1. find_files: work out WHICH files to scan (one file, or a whole folder).
 2. scan_file:  turn one file into "a list of findings", where each finding
    says where a possible secret is.
+
+Each finding also records whether it looks like a recognized placeholder
+(see placeholders.py). The scanner keeps those findings rather than
+dropping them, so the command-line tool can decide whether to show them
+and can say how many it hid.
 """
 
 # Lets us use modern type hints on Python 3.9 (see cli.py for details).
@@ -18,6 +23,9 @@ from dataclasses import dataclass
 # `Path` represents a file or folder location. It's the modern, readable
 # way to work with file paths in Python (instead of plain strings).
 from pathlib import Path
+
+# Decides whether a match is a recognized placeholder (see placeholders.py).
+from secretscan.placeholders import placeholder_reason
 
 # The list of rules to check, and the Rule type, from rules.py.
 from secretscan.rules import RULES, Rule
@@ -77,6 +85,16 @@ class Finding:
     # The matched text itself. We keep it so we can show a masked preview
     # later (e.g. "AKIA****"). It must NEVER be printed in full.
     secret: str
+
+    # The stable id of the rule that matched, e.g. "aws-access-key-id".
+    # Used to build the finding's fingerprint (see ignores.py).
+    # Defaults to "" so findings built by hand (e.g. in tests) still work.
+    rule_id: str = ""
+
+    # If this match is a recognized placeholder, a short reason why, e.g.
+    # "token body is all 'X' filler". None means "not a placeholder: report
+    # it". (`str | None` means "either a string or None".)
+    placeholder_reason: str | None = None
 
 
 def is_too_large(path: Path) -> bool:
@@ -223,6 +241,14 @@ def scan_file(path: Path) -> list[Finding]:
                         line_number=line_number,
                         rule_name=rule.name,
                         secret=secret,
+                        # Custom rules may not have an id; fall back to the
+                        # name so every finding still has an identifier.
+                        # (`a or b` gives `a`, unless `a` is empty, then `b`.)
+                        rule_id=rule.id or rule.name,
+                        # Each match is checked on its own, so a placeholder
+                        # and a real key on the same line are handled
+                        # separately.
+                        placeholder_reason=placeholder_reason(rule, secret),
                     )
                 )
 

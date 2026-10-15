@@ -67,6 +67,10 @@ def print_findings(findings: list[Finding]) -> None:
     Example output:
         src/settings.py:3   AWS Access Key ID   AKIA****************
         config/dev.py:12    AWS Access Key ID   AKIA****************
+
+    A finding is only printed with a placeholder reason when the user asked
+    to see placeholders (--include-placeholders). The reason is added at
+    the end of its line, so the user can tell why it's normally hidden.
     """
     # Build the "file:line" text for every finding first, so we can
     # measure how wide the first column needs to be.
@@ -84,11 +88,14 @@ def print_findings(findings: list[Finding]) -> None:
         # `width` characters long. That's what makes the columns line up.
         # The secret itself is ALWAYS passed through mask() first: the
         # tool must never print a full secret.
-        print(
+        line = (
             f"{location.ljust(location_width)}   "
             f"{finding.rule_name.ljust(rule_width)}   "
             f"{mask(finding.secret)}"
         )
+        if finding.placeholder_reason:
+            line += f"   (recognized placeholder: {finding.placeholder_reason})"
+        print(line)
 
 
 def plural(count: int, word: str) -> str:
@@ -98,17 +105,25 @@ def plural(count: int, word: str) -> str:
     return f"{count} {word}s"
 
 
-def summary(findings: list[Finding]) -> str:
+def summary(findings: list[Finding], anything_hidden: bool = False) -> str:
     """Return the one-line summary printed at the end of a scan.
 
     Examples:
         "No secrets found."
+        "No reportable secrets found."   (when some matches were hidden)
         "Found 1 possible secret in 1 file."
         "Found 3 possible secrets in 2 files."
 
     It says "possible" on purpose: the tool can't be 100% sure, because
     some matches may be fake keys or examples.
+
+    `anything_hidden` is True when some matches were hidden (for example,
+    recognized placeholders). Then "No secrets found." would overclaim:
+    something WAS found, we just decided not to report it. So the wording
+    changes to "No reportable secrets found."
     """
+    if not findings and anything_hidden:
+        return "No reportable secrets found."
     if not findings:
         return "No secrets found."
 
@@ -150,6 +165,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="the file or folder to scan (default: the current folder)",
     )
 
+    # `action="store_true"` makes this an on/off switch: if the user types
+    # `--include-placeholders`, args.include_placeholders is True;
+    # otherwise it's False. (argparse turns the dashes into underscores.)
+    parser.add_argument(
+        "--include-placeholders",
+        action="store_true",
+        help="also report recognized placeholder keys (like an all-X key) "
+        "instead of hiding them",
+    )
+
     # Add a `--version` option. `action="version"` is a built-in argparse
     # behavior: it prints the text below and then exits the program.
     # `%(prog)s` is filled in by argparse with the program name ("secretscan").
@@ -172,7 +197,8 @@ def main(argv: list[str] | None = None) -> int:
     - In tests, we pass a list directly, e.g. main(["config.py"]). This lets
       us test the command without opening a real terminal.
 
-    Returns the exit code: 0 = nothing found, 1 = secrets found.
+    Returns the exit code: 0 = nothing reportable found, 1 = secrets found.
+    Hidden placeholders don't count as found.
     (The exit code is how git hooks and CI know whether to block or pass.)
     """
     parser = build_parser()
@@ -190,12 +216,24 @@ def main(argv: list[str] | None = None) -> int:
     if not path.exists():
         parser.error(f"path not found: {path}")
 
-    # Scan every file and collect all the findings into one list.
-    # `extend` adds all items from one list onto the end of another
-    # (unlike `append`, which would add the whole list as a single item).
-    findings = []
+    # The scan happens in clear stages, each with one job.
+
+    # Stage 1: detect candidates. Scan every file and collect every match
+    # into one list. `extend` adds all items from one list onto the end of
+    # another (unlike `append`, which would add the whole list as one item).
+    candidates = []
     for file in find_files(path):
-        findings.extend(scan_file(file))
+        candidates.extend(scan_file(file))
+
+    # Stage 2: set aside recognized placeholders, unless the user asked to
+    # see them. The scanner has already marked each candidate with a
+    # `placeholder_reason` (None means "not a placeholder").
+    if args.include_placeholders:
+        findings = candidates
+        placeholders = []
+    else:
+        findings = [c for c in candidates if c.placeholder_reason is None]
+        placeholders = [c for c in candidates if c.placeholder_reason is not None]
 
     # Print the findings (if there are any), then a blank line to separate
     # them from the summary. print_findings can't handle an empty list,
@@ -206,7 +244,15 @@ def main(argv: list[str] | None = None) -> int:
 
     # Always finish with a summary, so the user knows the scan really ran,
     # even when nothing was found.
-    print(summary(findings))
+    print(summary(findings, anything_hidden=bool(placeholders)))
+
+    # If anything was hidden, say how much, and how to see it. Hiding
+    # things silently would leave the user no way to double-check us.
+    if placeholders:
+        print(
+            f"Suppressed {plural(len(placeholders), 'recognized placeholder')} "
+            "(use --include-placeholders to see)."
+        )
 
     # An empty list counts as False in Python, so this reads as:
     # "if anything was found, exit with 1; otherwise exit with 0".

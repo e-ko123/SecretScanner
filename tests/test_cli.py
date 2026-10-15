@@ -187,3 +187,63 @@ def test_missing_path_exits_2(tmp_path, capsys):
     assert exit_info.value.code == 2
     # Error messages go to "stderr" (the error output), not normal output.
     assert "path not found" in capsys.readouterr().err
+
+
+# --- placeholders ----------------------------------------------------------
+
+PLACEHOLDER_AWS_KEY = "AKIA" + "X" * 16
+
+
+def test_placeholder_only_file_exits_0_and_says_so(tmp_path, capsys):
+    file = tmp_path / "docs.py"
+    file.write_text(f"KEY = '{PLACEHOLDER_AWS_KEY}'\n")
+
+    assert main([str(file)]) == 0
+    assert capsys.readouterr().out == (
+        "No reportable secrets found.\n"
+        "Suppressed 1 recognized placeholder (use --include-placeholders to see).\n"
+    )
+
+
+def test_include_placeholders_reports_them_as_normal_findings(tmp_path, capsys):
+    file = tmp_path / "docs.py"
+    file.write_text(f"KEY = '{PLACEHOLDER_AWS_KEY}'\n")
+
+    # With the option, the placeholder counts as a finding: exit code 1.
+    assert main([str(file), "--include-placeholders"]) == 1
+
+    output = capsys.readouterr().out
+    assert f"{file}:1" in output
+    # The reason is shown, so the user knows why it's normally hidden.
+    assert "(recognized placeholder: token body is all 'X' filler)" in output
+    # Still masked.
+    assert PLACEHOLDER_AWS_KEY not in output
+    assert "Found 1 possible secret in 1 file." in output
+    assert "Suppressed" not in output
+
+
+def test_placeholders_and_real_findings_are_counted_separately(tmp_path, capsys):
+    (tmp_path / "docs.md").write_text(
+        f"{PLACEHOLDER_AWS_KEY}\n" f"AKIA{'0' * 16}\n"
+    )
+    (tmp_path / "config.py").write_text(f"KEY = '{FAKE_AWS_KEY}'\n")
+
+    assert main([str(tmp_path)]) == 1
+
+    lines = capsys.readouterr().out.splitlines()
+    # One real-looking finding is shown; the two placeholders are counted.
+    assert lines[0].startswith(f"{tmp_path / 'config.py'}:1")
+    assert lines[-2] == "Found 1 possible secret in 1 file."
+    assert lines[-1] == (
+        "Suppressed 2 recognized placeholders (use --include-placeholders to see)."
+    )
+
+
+def test_inline_ignore_still_applies_with_include_placeholders(tmp_path, capsys):
+    # --include-placeholders only turns off placeholder hiding. A line the
+    # user marked with secretscan:ignore is still skipped.
+    file = tmp_path / "docs.py"
+    file.write_text(f"KEY = '{PLACEHOLDER_AWS_KEY}'  # secretscan:ignore\n")
+
+    assert main([str(file), "--include-placeholders"]) == 0
+    assert capsys.readouterr().out == "No secrets found.\n"
