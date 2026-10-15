@@ -442,6 +442,10 @@ def scan_file(path: Path, include_inline: bool = False) -> list[Finding]:
                 continue
             left, right = parts.group("left", "right")
             for rule in RULES:
+                # A private-key header split over two strings has no key data
+                # to identify it (see private_key_block), so it's not joined.
+                if rule.id == "private-key":
+                    continue
                 for match in rule.pattern.finditer(left + right):
                     # Only matches that cross the join are new; keys entirely
                     # inside one fragment were found line by line above.

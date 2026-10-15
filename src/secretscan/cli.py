@@ -76,9 +76,11 @@ def display(value: object) -> str:
         # `pattern.sub(function, text)` replaces every match with whatever
         # the function returns for it; here, the masked version.
         text = rule.pattern.sub(lambda match: mask(match.group(0)), text)
-    # `ascii()` returns the text as a quoted Python string with escapes;
-    # [1:-1] drops the surrounding quotes.
-    return ascii(text)[1:-1]
+    # Keep ordinary printable characters (codes 32 to 126) as they are, and
+    # write anything else as an escape like \x1b or \u4e2d. `ascii(char)`
+    # gives the escape in quotes; [1:-1] drops the quotes. Backslashes are
+    # printable, so Windows paths like C:\Users\me keep single backslashes.
+    return "".join(char if " " <= char <= "~" else ascii(char)[1:-1] for char in text)
 
 
 def scan_root(path: Path) -> Path:
@@ -579,15 +581,20 @@ def run(argv: list[str] | None = None) -> int:
         # skipping it would print "No secrets found." without checking it.
         # `resolve()` turns both into full, absolute paths, so the same
         # file written two different ways still compares as equal.
-        if ignore_path is not None and file.resolve() == ignore_path.resolve():
-            if path.is_dir():
-                continue
-        elif file.name == IGNORE_FILE_NAME:
+        is_active_ignore = ignore_path is not None and file.resolve() == ignore_path.resolve()
+        if is_active_ignore and path.is_dir():
+            continue
+        # With --no-ignore no ignore file is used at all, so there's nothing
+        # to point out.
+        if not is_active_ignore and file.name == IGNORE_FILE_NAME and not args.no_ignore:
             unused_ignore_files.append(file)
         try:
             candidates.extend(scan_file(file, include_inline=True))
-            status = file.stat()
-            snapshot[file] = (status.st_mtime_ns, status.st_size)
+            # The active ignore file is left out of the snapshot: --review
+            # changes it on purpose when it saves the answers.
+            if not is_active_ignore:
+                status = file.stat()
+                snapshot[file] = (status.st_mtime_ns, status.st_size)
         except (OSError, UnicodeError):
             issues.append(ScanIssue(str(file), "could not read file", True))
 
@@ -709,9 +716,11 @@ def run(argv: list[str] | None = None) -> int:
             "(use --no-ignore to see)."
         )
 
+    # Name the file that IS in use, or where one would have to be.
+    in_use = (f"only {display(ignore_path)} applies" if ignore_path is not None
+              else f"only a {IGNORE_FILE_NAME} in {display(root)} would apply")
     for extra in unused_ignore_files:
-        print(f"Notice: {display(extra)} is not used; only "
-              f"{display(Path(root) / IGNORE_FILE_NAME)} applies to this scan.", file=sys.stderr)
+        print(f"Notice: {display(extra)} is not used by this scan; {in_use}.", file=sys.stderr)
 
     if inline_count:
         print(f"Ignored {plural(inline_count, 'inline finding')} "

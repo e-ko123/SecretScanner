@@ -681,3 +681,43 @@ def test_answers_are_printed_if_no_location_can_be_saved(tmp_path, monkeypatch, 
     err = capsys.readouterr().err
     assert "Add these entries" in err
     assert '"reason": "fixture"' in err
+
+
+# --- audit round 1: bugs introduced by the second-audit fixes -------------------
+
+def test_no_unused_notice_names_the_active_or_missing_file(tmp_path, capsys):
+    (tmp_path / ".git").mkdir()
+    save_ignore_file(tmp_path / ".secretscanignore", {})
+    other = tmp_path.parent / (tmp_path.name + "-other.json")
+    save_ignore_file(other, {})
+    # --no-ignore uses no ignore file, so there's nothing to point out.
+    assert cli.main([str(tmp_path), "--no-ignore"]) == 0
+    assert "Notice" not in capsys.readouterr().err
+    # With --ignore-file, the root's file IS unused, and the notice names
+    # the file that's actually in use.
+    assert cli.main([str(tmp_path), "--ignore-file", str(other)]) == 0
+    err = capsys.readouterr().err
+    assert "is not used by this scan" in err
+    assert other.name in err
+
+
+def test_review_of_the_ignore_file_itself_is_not_a_change_during_review(tmp_path, monkeypatch, capsys):
+    (tmp_path / ".git").mkdir()
+    ignore = tmp_path / ".secretscanignore"
+    ignore.write_text(json.dumps({"version": 1, "findings": [
+        {"id": "a" * 64, "reason": "was " + AWS}]}))
+    answer(monkeypatch, "y", "")
+    # Saving the answer changes this file on purpose; that's not an outside edit.
+    assert cli.main([str(ignore), "--review"]) == 0
+
+
+def test_backslashes_in_paths_are_not_doubled():
+    assert cli.display("C:\\Users\\me\\app.py") == "C:\\Users\\me\\app.py"
+    # Control characters are still escaped.
+    assert cli.display("a\x1bb") == "a\\x1bb"
+
+
+def test_private_key_header_split_over_two_strings_is_not_reported(tmp_path):
+    path = tmp_path / "doc.py"
+    path.write_text('h = ("-----BEGIN RSA PRIV"\n     "ATE KEY-----")\n')
+    assert scanner.scan_file(path) == []
