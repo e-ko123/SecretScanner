@@ -43,7 +43,7 @@ It's a small, dependency-free command-line tool written in Python, inspired by p
 
 ## Why I built this
 
-Leaking a secret is one of the most common and most expensive mistakes a developer can make. A single API key pushed to a public GitHub repo can be found by automated bots within minutes and used to run up huge bills or steal data.
+Leaking a secret is one of the most common and most expensive mistakes a developer can make. A single API key pushed to a public GitHub repo can be found by automated bots within minutes and used to run up huge bills or steal data. I personally have almost made this mistake by almost leaking an env file, however, I was fortunate enough that my coworker was able to catch my mistake before I commited. I realized in that moment that people everyday make these mistakes, so I decided to create a simple command that could prevent this mistake from happening.
 
 I wanted to understand how tools that prevent this actually work, so I built a simpler version from scratch. Along the way I'm learning about regular expressions, measuring randomness with Shannon entropy, how git stores staged changes, and how git hooks work (some of these parts are still being built). I kept the code small and readable on purpose, so every part can be understood and explained.
 
