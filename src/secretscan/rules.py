@@ -16,7 +16,7 @@ import re
 # `dataclass` is a shortcut for writing simple classes that just hold data.
 # Instead of writing an __init__ method by hand, we list the fields and
 # Python writes the boilerplate for us.
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 
 # `frozen=True` makes Rule objects read-only after they're created.
@@ -39,6 +39,8 @@ class Rule:
     # characters after "AKIA". Placeholder detection (placeholders.py) only
     # looks at the body, and only for rules that define one. Rules without
     # a body group are never treated as placeholders by those checks.
+    # A separate `secret` group extracts just the value of generic assignments;
+    # all existing provider rules keep using their complete match.
     pattern: re.Pattern
 
     # A short, stable identifier, e.g. "aws-access-key-id". It's used to
@@ -50,6 +52,10 @@ class Rule:
     # a name and a pattern (like some tests) keeps working. When it's empty,
     # the scanner falls back to using `name` as the identifier.
     id: str = ""
+
+    # A password assignment is strong context even for a predictable value.
+    # Context variants share the generic rule's ID so existing dismissals work.
+    password_assignment: bool = False
 
 
 # Token prefixes may follow escaped newlines, URL encodings, or identifiers.
@@ -377,6 +383,47 @@ PRIVATE_KEY = Rule(
 )
 
 
+# Generic assignments have no provider prefix to identify them. Match a
+# selected variable/property name and a quoted literal, then let scanner.py
+# check the VALUE's context, length, and entropy. The named `secret` group deliberately
+# excludes the variable name, assignment operator, and surrounding quotes.
+#
+# (?<![\w-]) prevents starting halfway through an identifier.
+# key_quote and its backreference allow password, "password", or 'password'.
+# Prefix segments allow names like database_password or MY_CLIENT_SECRET.
+# [ \t] keeps the entire assignment on one physical line.
+# =(?![=]) rejects equality comparisons such as password == "...".
+# value_quote and its backreference require matching opening/closing quotes.
+# Inside the value, a backslash consumes the next character as one pair; the
+# other alternative consumes one non-backslash character unless it ends the
+# string. This handles escaped quotes without crossing a line boundary.
+GENERIC_SECRET = Rule(
+    name="Generic Password or Secret",
+    pattern=re.compile(
+        r"(?<![\w-])(?P<key_quote>[\"']?)"
+        r"(?:[a-z0-9]+[_-])*"
+        r"(?:(?P<password_name>password|passwd|pwd)|secret|api[_-]?key|access[_-]?token|auth[_-]?token|client[_-]?secret)"
+        r"(?P=key_quote)[ \t]*(?::|=(?!=))[ \t]*"
+        r"(?P<value_quote>[\"'])(?P<secret>(?:\\[^\r\n]|(?!(?P=value_quote))[^\\\r\n])*)"
+        r"(?P=value_quote)",
+        re.IGNORECASE,
+    ),
+    id="generic-secret",
+)
+
+
+# These are labels for matches of GENERIC_SECRET, not extra regex passes.
+# `replace` copies the frozen dataclass while changing selected fields. Keep
+# the same ID and pattern so adding weak-password coverage does not invalidate
+# previously reviewed generic-password findings.
+PASSWORD_ASSIGNMENT = replace(
+    GENERIC_SECRET, name="Hard-coded Password", password_assignment=True,
+)
+WEAK_PASSWORD_ASSIGNMENT = replace(
+    PASSWORD_ASSIGNMENT, name="Possible Weak Password or Placeholder",
+)
+
+
 # Every rule the scanner uses. The scanner loops over this list, so adding
 # a new rule here is all it takes for it to be checked.
 RULES = [
@@ -391,4 +438,5 @@ RULES = [
     ANTHROPIC_API_KEY,
     OPENAI_API_KEY,
     PRIVATE_KEY,
+    GENERIC_SECRET,
 ]

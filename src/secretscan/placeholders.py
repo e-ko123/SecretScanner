@@ -95,6 +95,18 @@ SLACK_INSTRUCTIONAL_PLACEHOLDERS = {
 }
 
 
+# Exact instructional values for generic assignments. Matching the whole
+# value avoids hiding a real password merely because it CONTAINS "example".
+# Keep these explicit: words that appear inside credentials are not evidence.
+GENERIC_PLACEHOLDERS = {
+    "changeme", "change-me", "change_me", "password", "secret",
+    "your-password-here", "your_password_here", "your-secret-here",
+    "your_secret_here", "your-api-key-here", "your_api_key_here",
+    "insert-password-here", "insert-secret-here", "replace-me", "replace_me",
+    "replace-with-your-password", "replace-with-your-api-key",
+}
+
+
 def token_body(rule: Rule, candidate: str) -> str | None:
     """Return the variable part ("body") of a matched token, if the rule has one.
 
@@ -138,6 +150,14 @@ def placeholder_reason(rule: Rule, candidate: str) -> str | None:
     The reason never contains the candidate itself, so it's always safe to
     print.
     """
+    # Assignment context is more important than a placeholder guess: even
+    # changeme can be someone's actual password. Review can dismiss examples.
+    if rule.password_assignment:
+        return None
+
+    if rule.id == "generic-secret" and candidate.lower() in GENERIC_PLACEHOLDERS:
+        return "instructional placeholder"
+
     # These exact instructional strings are common Slack placeholders. The
     # second is from Slack's own token-rotation guide:
     # https://docs.slack.dev/authentication/using-token-rotation/

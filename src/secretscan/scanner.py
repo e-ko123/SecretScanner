@@ -32,11 +32,13 @@ from dataclasses import dataclass
 # way to work with file paths in Python (instead of plain strings).
 from pathlib import Path
 
+# Scores generic candidates; provider keys do not use the entropy gate.
+from secretscan.entropy import MIN_SECRET_ENTROPY, MIN_SECRET_LENGTH, shannon_entropy
 # Decides whether a match is a recognized placeholder (see placeholders.py).
 from secretscan.placeholders import placeholder_reason
 
 # The list of rules to check, and the Rule type, from rules.py.
-from secretscan.rules import RULES, Rule
+from secretscan.rules import RULES, PASSWORD_ASSIGNMENT, WEAK_PASSWORD_ASSIGNMENT, Rule
 
 
 # Folders we never look inside. They hold tools, downloaded dependencies,
@@ -106,6 +108,9 @@ class Finding:
     # Hidden findings are kept (not thrown away), so the tool can count them
     # and show them again with --include-inline-ignored.
     inline_ignored: bool = False
+
+    # Last physical line involved in a match; staged scans need the whole span.
+    end_line_number: int | None = None
 
 
 def is_too_large(path: Path) -> bool:
@@ -335,6 +340,15 @@ def has_inline_ignore(line: str, matches: list[tuple[Rule, str]]) -> bool:
             and re.search(rf"(?:^|\s)(?:#|//)\s*{re.escape(IGNORE_MARKER)}\s*$", line) is not None)
 
 
+# Recognize complete environment/template references, not substrings inside a
+# real value. Function calls (os.getenv, process.env, ...) already do not match
+# the quoted-literal assignment rule at all.
+ENVIRONMENT_REFERENCE = re.compile(
+    r"(?:\$\{[^{}\r\n]+\}|\$[A-Za-z_][A-Za-z0-9_]*"
+    r"|\{\{[^{}\r\n]+\}\}|%[A-Za-z_][A-Za-z0-9_]*%)"
+)
+
+
 def scan_line(line: str, rules: list[Rule] = RULES, include_inline: bool = False) -> list[tuple[Rule, str]]:
     """Check one line of text against every rule.
 
@@ -346,14 +360,54 @@ def scan_line(line: str, rules: list[Rule] = RULES, include_inline: bool = False
     secretscan:ignore comment". scan_file uses it so it can count how many
     matches the comments hid, instead of losing track of them.
     """
-    matches = []
+    candidates = []
 
     for rule in rules:
-        # `finditer` finds EVERY match of the pattern in the line, not just
-        # the first one, in case a single line contains two keys.
+        # Retain source positions until deduplication. Equal text elsewhere
+        # on this line must not hide a distinct assignment's finding.
         for match in rule.pattern.finditer(line):
-            # `match.group(0)` is the exact text the pattern matched.
-            matches.append((rule, match.group(0)))
+            group = "secret" if "secret" in rule.pattern.groupindex else 0
+            secret = match.group(group)
+            if rule.id == "generic-secret":
+                if ENVIRONMENT_REFERENCE.fullmatch(secret):
+                    continue
+                if not secret:
+                    # An empty configuration value is not a stored password.
+                    continue
+                is_password = match.group("password_name") is not None
+                reason = placeholder_reason(rule, secret)
+                below_threshold = (
+                    len(secret) < MIN_SECRET_LENGTH
+                    or shannon_entropy(secret) < MIN_SECRET_ENTROPY
+                )
+                if is_password:
+                    # Password context bypasses the heuristic. A value such
+                    # as changeme may be a deployed password, not an example.
+                    rule_for_match = (
+                        WEAK_PASSWORD_ASSIGNMENT if below_threshold or reason
+                        else PASSWORD_ASSIGNMENT
+                    )
+                else:
+                    # Broader names still need entropy, apart from recognized
+                    # placeholders retained for --include-placeholders.
+                    if reason is None and below_threshold:
+                        continue
+                    rule_for_match = rule
+            else:
+                rule_for_match = rule
+            candidates.append((rule_for_match, secret, match.span(group)))
+
+    provider_spans = [span for rule, _, span in candidates if rule.id != "generic-secret"]
+    matches = []
+    for rule, secret, (start, end) in candidates:
+        # A provider-specific diagnosis is more useful than a second generic
+        # warning for the same value. Leave unrelated matches on the line alone.
+        if rule.id == "generic-secret" and any(
+            start < other_end and other_start < end
+            for other_start, other_end in provider_spans
+        ):
+            continue
+        matches.append((rule, secret))
 
     # Only after finding the matches can we tell whether the comment
     # applies (it needs exactly one match; see has_inline_ignore).
@@ -457,8 +511,8 @@ KEY_END = re.compile(r"-----END[A-Z ]*PRIVATE KEY(?: BLOCK)?-----|Private-MAC: *
 KEY_DATA_LINES = 5
 
 
-def private_key_block(lines: list[str], index: int, start: int) -> str | None:
-    """Return the key's text from its header to its end, or None for a header mention.
+def private_key_block(lines: list[str], index: int, start: int) -> tuple[str, int] | None:
+    """Return (key text, last line number), or None for a header mention.
 
     `lines[index]` is the header's line and `start` is where the header
     begins in it. The returned text (with spaces, line breaks, and "\n"
@@ -477,29 +531,40 @@ def private_key_block(lines: list[str], index: int, start: int) -> str | None:
     block = ahead[:end.end()] if end else nearby
     # \s+ is any run of whitespace; \\[nr] is a written-out "\n" or "\r",
     # as in a key stored inside a JSON string.
-    return re.sub(r"\s+|\\[nr]", "", block)
+    # Count real line breaks before stripping whitespace. Written-out JSON
+    # escapes do not add physical source lines. Line numbers start at 1.
+    last_line = index + 1 + block.rstrip("\r\n").count("\n")
+    return re.sub(r"\s+|\\[nr]", "", block), last_line
 
 
 def scan_file(path: Path, include_inline: bool = False) -> list[Finding]:
     """Read one file and return every possible secret found in it."""
-    findings = []
-
-    # Read the file once, safely (see read_regular_file). If it grew past
-    # the size limit since find_files checked it, refuse rather than read
-    # an unbounded amount.
     data = read_regular_file(path, MAX_FILE_SIZE)
+    return scan_bytes(data, path, include_inline)
+
+
+def text_lines(data: bytes) -> list[str]:
+    """Decode disk files and Git blobs the same way, including BOM-marked text."""
+    return io.TextIOWrapper(
+        io.BytesIO(data), encoding=text_encoding(data[:4]), errors="replace"
+    ).readlines()
+
+
+def scan_bytes(data: bytes, path: Path, include_inline: bool = False) -> list[Finding]:
+    """Scan already-read bytes, so Git scans never need a working-tree file."""
     if len(data) > MAX_FILE_SIZE:
-        raise OSError(f"file grew past the size limit: {path}")
+        raise OSError(f"file exceeds the size limit: {path}")
+    findings = []
 
     # Turn the bytes into lines of text, exactly like opening the file as
     # text would. `TextIOWrapper` over `BytesIO` reads from the bytes we
     # already have instead of opening the file again.
     # - errors="replace": a few invalid bytes become a placeholder
     #   character instead of stopping the scan.
-    encoding = text_encoding(data[:4])
-    lines = io.TextIOWrapper(io.BytesIO(data), encoding=encoding, errors="replace").readlines()
+    lines = text_lines(data)
 
-    def add(line_number: int, rule: Rule, secret: str, inline_ignored: bool = False) -> None:
+    def add(line_number: int, rule: Rule, secret: str, inline_ignored: bool = False,
+            end_line_number: int | None = None) -> None:
         """Record one finding (a small helper so every place builds it the same way)."""
         findings.append(Finding(
             path=str(path),
@@ -514,6 +579,7 @@ def scan_file(path: Path, include_inline: bool = False) -> list[Finding]:
             # key on the same line are handled separately.
             placeholder_reason=placeholder_reason(rule, secret),
             inline_ignored=inline_ignored,
+            end_line_number=end_line_number or line_number,
         ))
 
     # `enumerate(lines, start=1)` gives us each line together with its
@@ -525,21 +591,28 @@ def scan_file(path: Path, include_inline: bool = False) -> list[Finding]:
         # keys the raw line didn't already show.
         decoded = decode_json_escapes(line)
         if decoded != line:
-            already = {secret for _, secret in matches}
-            matches += [m for m in scan_line(decoded, include_inline=True) if m[1] not in already]
+            # Generic values should use the decoded text once, rather than
+            # reporting both its escaped and decoded spelling. Keep existing
+            # provider matches if decoding would obscure their original shape.
+            decoded_matches = scan_line(decoded, include_inline=True)
+            matches = [m for m in matches if m[0].id != "generic-secret"]
+            already = {(rule.id, secret) for rule, secret in matches}
+            matches += [m for m in decoded_matches if (m[0].id, m[1]) not in already]
 
         inline_ignored = has_inline_ignore(line, matches)
         if inline_ignored and not include_inline:
             continue
         for rule, secret in matches:
+            end_line = line_number
             if rule.id == "private-key":
                 # Replace the shared header with this key's own data; skip
                 # headers that have no key data under them.
-                block = private_key_block(lines, line_number - 1, max(line.find(secret), 0))
+                start = max(line.find(secret), 0)
+                block = private_key_block(lines, line_number - 1, start)
                 if block is None:
                     continue
-                secret = block
-            add(line_number, rule, secret, inline_ignored)
+                secret, end_line = block
+            add(line_number, rule, secret, inline_ignored, end_line)
 
     # Keys split across two quoted fragments on neighboring lines.
     depths = bracket_depths(lines)
@@ -554,7 +627,9 @@ def scan_file(path: Path, include_inline: bool = False) -> list[Finding]:
             for rule in RULES:
                 # A private-key header split over two strings has no key data
                 # to identify it (see private_key_block), so it's not joined.
-                if rule.id == "private-key":
+                # Generic matching needs the assignment name too, so this
+                # provider-only fragment pass cannot reconstruct it safely.
+                if rule.id in ("private-key", "generic-secret"):
                     continue
                 for match in rule.pattern.finditer(left + right):
                     # Only matches that cross the join are new; keys entirely
@@ -569,7 +644,7 @@ def scan_file(path: Path, include_inline: bool = False) -> list[Finding]:
                             if not (f.line_number == number and f.rule_id == (rule.id or rule.name)
                                     and secret.startswith(f.secret) and left.endswith(f.secret))
                         ]
-                        add(number, rule, secret)
+                        add(number, rule, secret, end_line_number=number + 1)
 
     # Report findings in the order they appear in the file. `sort` keeps
     # findings on the same line in their original order ("stable" sorting).

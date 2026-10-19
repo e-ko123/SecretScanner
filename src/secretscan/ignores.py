@@ -166,6 +166,11 @@ def load_ignore_file(path: Path) -> dict[str, str]:
         data = read_regular_file(path, MAX_IGNORE_FILE_SIZE)
     except OSError:
         raise IgnoreFileError("could not be read (it must be a regular file)")
+    return parse_ignore_bytes(data)
+
+
+def parse_ignore_bytes(data: bytes) -> dict[str, str]:
+    """Validate an ignore file from disk or the staged Git snapshot."""
     if len(data) > MAX_IGNORE_FILE_SIZE:
         raise IgnoreFileError("is larger than 1 MB")
     # "utf-8-sig" also accepts the invisible marker Windows Notepad adds.

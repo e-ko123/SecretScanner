@@ -408,6 +408,12 @@ def build_parser() -> argparse.ArgumentParser:
         prog="secretscan",
         # The sentence shown at the top of `secretscan --help`.
         description="Find API keys and private keys accidentally left in your code.",
+        epilog="Install commit protection: secretscan install-hook [--force]",
+    )
+
+    parser.add_argument(
+        "--staged", action="store_true",
+        help="scan added lines in the Git index (the next commit)",
     )
 
     # The file or folder to scan. Because the name has no leading dashes,
@@ -533,12 +539,20 @@ def run(argv: list[str] | None = None) -> int:
     findings dismissed in the ignore file don't count as found.
     (The exit code is how git hooks and CI know whether to block or pass.)
     """
+    # Keep the original scan syntax while reserving one explicit command.
+    arguments = list(sys.argv[1:] if argv is None else argv)
+    if arguments and arguments[0] == "install-hook":
+        from secretscan.hook import install_command
+        return install_command(arguments[1:])
     parser = build_parser()
 
     # Read and check the options. If the user typed something invalid,
     # argparse prints an error and exits on its own.
     # `args.path` holds the file or folder the user typed (or "." if none).
-    args = parser.parse_args(argv)
+    args = parser.parse_args(arguments)
+    if args.staged:
+        from secretscan.staged import staged_command
+        return staged_command(args)
     path = Path(args.path)
 
     # Check the path exists before trying to scan it. `parser.error` prints
