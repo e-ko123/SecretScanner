@@ -65,7 +65,8 @@ jobs:
       - name: Run the tests
         run: python -m pytest -q
 
-      # "Dogfooding": use the tool on itself. The source code must contain
-      # no secrets; exit code 1 (secrets found) or 2 (error) fails the run.
-      - name: Scan secretscan's own source code
-        run: secretscan src/secretscan
+      # "Dogfooding": use the tool on its whole repository. Known test
+      # examples are dismissed in the committed .secretscanignore, so anything
+      # new (exit code 1) or any error (exit code 2) fails the run.
+      - name: Scan this repository with secretscan
+        run: secretscan .

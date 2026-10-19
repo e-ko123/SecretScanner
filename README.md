@@ -707,7 +707,7 @@ pip install -e ".[dev]"   # -e = "editable": code changes take effect without re
 pytest                    # [dev] = also install the development tools (pytest)
 ```
 
-Every push to GitHub also runs the full test suite automatically, on every supported Python version (3.9–3.14) on Linux, plus 3.9 and 3.14 on macOS ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)). The badge at the top of this README shows whether the latest run passed. Each run also scans secretscan's own source code with secretscan.
+Every push to GitHub also runs the full test suite automatically, on every supported Python version (3.9–3.14) on Linux, plus 3.9 and 3.14 on macOS ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)). The badge at the top of this README shows whether the latest run passed. Each run also scans the whole repository with secretscan itself.
 
 > **Note on fake secrets in tests:** GitHub automatically blocks pushes that contain real-looking secrets. To avoid this, tests never contain a complete fake key as plain text. They build it in code instead, for example `"AKIA" + "X" * 16`, so the full string never appears in any file.
 
