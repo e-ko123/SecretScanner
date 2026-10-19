@@ -728,7 +728,13 @@ def test_private_key_header_split_over_two_strings_is_not_reported(tmp_path):
 def test_deeply_nested_ignore_file_gives_a_clear_error(tmp_path, capsys):
     (tmp_path / ".secretscanignore").write_text("[" * 100_000 + "]" * 100_000)
     assert cli.main([str(tmp_path)]) == 2
-    assert "nested too deeply" in capsys.readouterr().err
+    err = capsys.readouterr().err
+    # Older Pythons give up on deep nesting (RecursionError, which we turn
+    # into "nested too deeply"). Python 3.14+ can read it, and then the file
+    # is rejected because its top level is a list. Either way: a clear error,
+    # not "scan failed (RecursionError)".
+    assert "nested too deeply" in err or "top level must be a JSON object" in err
+    assert "scan failed" not in err
 
 
 def test_missing_package_metadata_does_not_break_scanning(tmp_path, monkeypatch, capsys):

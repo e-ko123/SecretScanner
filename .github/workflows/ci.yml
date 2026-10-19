@@ -1,0 +1,71 @@
+# GitHub Actions: GitHub runs this automatically on every push and pull request.
+# It installs secretscan on fresh machines, once per supported Python version,
+# runs the whole test suite, and then lets secretscan scan its own source code.
+# A red X next to a commit on GitHub means something here failed.
+
+name: Tests
+
+# When to run: on every push to any branch, and on every pull request.
+on:
+  push:
+  pull_request:
+
+# The workflow only needs to read the code, so it gets read-only access.
+permissions:
+  contents: read
+
+jobs:
+  test:
+    # The name shown on GitHub, e.g. "Python 3.12 on ubuntu-latest".
+    name: Python ${{ matrix.python-version }} on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+
+    # A "matrix" runs this same job once for every combination listed:
+    # every supported Python version on Linux, plus the oldest and newest
+    # on macOS (the system this project is developed on).
+    strategy:
+      # Keep the other versions running when one fails, so one run shows
+      # every version that's broken, not just the first.
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest]
+        # pyproject.toml says Python 3.9 or newer.
+        python-version: ["3.9", "3.10", "3.11", "3.12", "3.13", "3.14"]
+        include:
+          - os: macos-latest
+            python-version: "3.9"
+          - os: macos-latest
+            python-version: "3.14"
+
+    steps:
+      # Download this repository's code onto the fresh machine.
+      - uses: actions/checkout@v5
+
+      # Install the Python version this run is testing.
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      # Install secretscan the way the README tells users to (a normal,
+      # non-editable install), plus pytest. Testing the INSTALLED package
+      # catches packaging mistakes, like a module missing from the package.
+      - name: Install secretscan and test tools
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install ".[dev]"
+
+      # The --staged and install-hook tests create small Git repositories.
+      # Git refuses to commit without a name and email, so give it some.
+      - name: Configure Git for the tests
+        run: |
+          git config --global user.name "CI"
+          git config --global user.email "ci@example.invalid"
+
+      # Run every test. Any failure makes this step (and the run) fail.
+      - name: Run the tests
+        run: python -m pytest -q
+
+      # "Dogfooding": use the tool on itself. The source code must contain
+      # no secrets; exit code 1 (secrets found) or 2 (error) fails the run.
+      - name: Scan secretscan's own source code
+        run: secretscan src/secretscan

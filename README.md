@@ -1,5 +1,7 @@
 # SecretScanner
 
+[![Tests](https://github.com/e-ko123/SecretScanner/actions/workflows/ci.yml/badge.svg)](https://github.com/e-ko123/SecretScanner/actions/workflows/ci.yml)
+
 **`secretscan` finds API keys, hard-coded passwords/secrets, and private keys accidentally left in your code.** It can block git commits containing detected secrets.
 
 It's a small, dependency-free command-line tool written in Python, inspired by professional tools like [gitleaks](https://github.com/gitleaks/gitleaks) and [GitGuardian](https://www.gitguardian.com/).
@@ -35,7 +37,7 @@ It's a small, dependency-free command-line tool written in Python, inspired by p
 
 - [x] **Phase 1: Core scanner.** Scan files and folders, detect provider keys, private keys, and generic secrets using entropy; mask output, filter placeholders, and review false alarms.
 - [x] **Phase 2: Git integration.** `--staged` scanning and the `install-hook` command.
-- [ ] **Phase 3: Polish.** JSON output, colored output, GitHub Actions CI.
+- [ ] **Phase 3: Polish.** Done: JSON output, and GitHub Actions CI (tests on Python 3.9–3.14, Linux and macOS). Still planned: colored output.
 
 ---
 
@@ -696,6 +698,8 @@ Tests use [pytest](https://pytest.org/), which is only needed for development, n
 pip install -e ".[dev]"   # -e = "editable": code changes take effect without reinstalling
 pytest                    # [dev] = also install the development tools (pytest)
 ```
+
+Every push to GitHub also runs the full test suite automatically, on every supported Python version (3.9–3.14) on Linux, plus 3.9 and 3.14 on macOS ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)). The badge at the top of this README shows whether the latest run passed. Each run also scans secretscan's own source code with secretscan.
 
 > **Note on fake secrets in tests:** GitHub automatically blocks pushes that contain real-looking secrets. To avoid this, tests never contain a complete fake key as plain text. They build it in code instead, for example `"AKIA" + "X" * 16`, so the full string never appears in any file.
 
