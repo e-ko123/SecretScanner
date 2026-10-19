@@ -191,6 +191,7 @@ If nothing is left to report but some matches were hidden, it says **"No reporta
 | `--include-placeholders` | Also report recognized placeholder keys instead of hiding them |
 | `--review` | Go through the findings one by one and choose which to ignore from now on |
 | `--show-ids` | Show each finding's ID, for dismissing it in `.secretscanignore` |
+| `--json` | Print the results as JSON (secrets still masked), for other programs |
 | `--ignore-file PATH` | Use this ignore file instead of `.secretscanignore` in the scanned folder |
 | `--no-ignore` | Don't use any ignore file. Can't be combined with `--ignore-file` |
 | `--version`, `--help` | Show the version or the help text |
@@ -264,26 +265,44 @@ could not finish.
 
 > ⚠️ Anyone can skip git hooks with `git commit --no-verify`. The hook is a safety net against accidents, not a security barrier. For a check that can't be skipped, also run `secretscan` in CI (see [What I'd add next](#what-id-add-next)).
 
-### JSON output (for other programs) *(planned)*
+### JSON output (for other programs)
 
 ```bash
 secretscan --json
+secretscan --staged --json
 ```
 
-This prints results as [JSON](https://www.json.org/), a structured format that scripts and other tools can read easily:
+This prints the results as [JSON](https://www.json.org/), a structured format that scripts, CI systems, and other tools can read reliably:
 
 ```json
-[
-  {
-    "file": "config.py",
-    "line": 12,
-    "rule": "AWS Access Key ID",
-    "match": "AKIA****************"
-  }
-]
+{
+  "version": 1,
+  "findings": [
+    {
+      "file": "config.py",
+      "line": 12,
+      "end_line": 12,
+      "rule": "AWS Access Key ID",
+      "rule_id": "aws-access-key-id",
+      "match": "AKIA****************",
+      "id": "ca9aab23320c6c2a2680248fb6f4140873aba772489ba573945359a64a3178ab",
+      "placeholder": null
+    }
+  ],
+  "summary": {"findings": 1, "files": 1, "suppressed": 0, "skipped": 0},
+  "skipped": []
+}
 ```
 
-Secrets are masked in JSON output too.
+- **`match` is always masked**, exactly like the normal output. File names that look like keys are masked too.
+- `id` is the same ID that `--show-ids` prints and `.secretscanignore` uses.
+- `end_line` differs from `line` for keys that span several lines (private keys, keys split over two lines).
+- `placeholder` is the reason a finding is a recognized placeholder (only with `--include-placeholders`), otherwise `null`.
+- `summary.suppressed` counts findings hidden as placeholders, by the ignore file, or by `secretscan:ignore` comments.
+- `skipped` lists paths that weren't scanned, and why. `error: true` means something went wrong (the exit code is then `2`).
+- `version` is the layout's version number. It only changes if the layout changes in a way that could break programs reading it.
+
+The normal output contains the JSON document and nothing else; notices go to stderr. The exit codes are the same as without `--json`. On an error (exit code `2`, for example a broken ignore file), nothing is printed on the normal output, only the error message on stderr. `--json` can't be combined with `--review`.
 
 ### Colors *(planned)*
 

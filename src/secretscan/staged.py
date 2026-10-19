@@ -110,7 +110,7 @@ def added_lines(before: bytes, after: bytes) -> set[int]:
 def staged_command(args) -> int:
     """Apply normal filtering and masked output to added staged lines."""
     # Import here to avoid a circular import when cli dispatches this command.
-    from secretscan.cli import config_error, display, print_findings, summary
+    from secretscan.cli import config_error, display, json_report, print_findings, summary
 
     if args.path != "." or args.review:
         return config_error("--staged scans the whole repository and cannot use a path or --review")
@@ -169,10 +169,14 @@ def staged_command(args) -> int:
                 findings.append(finding)
         ids = [fingerprint(f.rule_id, f.path, f.secret) for f in findings]
         # Keep IDs in the same order as the printed findings.
-        if findings:
+        if args.json:
+            # One JSON document on stdout, same layout as a normal --json scan.
+            print(json_report(findings, ids, hidden, issues))
+        elif findings:
             print_findings(findings, ids if args.show_ids else None)
-        print(summary(findings, anything_hidden=bool(hidden or issues)))
-        if hidden:
+        if not args.json:
+            print(summary(findings, anything_hidden=bool(hidden or issues)))
+        if hidden and not args.json:
             print(f"Suppressed {hidden} staged finding(s) by placeholders, inline markers, or ignore IDs.")
         for issue in issues:
             print(f"secretscan: {display(issue.path)}: {issue.reason}", file=sys.stderr)

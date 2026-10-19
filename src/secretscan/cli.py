@@ -60,6 +60,20 @@ MAX_HIDDEN_CHARS = 40
 MAX_LOCATION_WIDTH = 250
 
 
+def redact(value: object) -> str:
+    """Mask anything key-shaped in `value`, exactly like findings are masked.
+
+    A file can be NAMED after a key, and a mistyped option can contain one.
+    Used for both normal output (through display) and JSON output.
+    """
+    text = str(value)
+    for rule in RULES:
+        # `pattern.sub(function, text)` replaces every match with whatever
+        # the function returns for it; here, the masked version.
+        text = rule.pattern.sub(lambda match: mask(match.group(0)), text)
+    return text
+
+
 def display(value: object) -> str:
     """Make text from outside (file names, error messages) safe to print.
 
@@ -71,11 +85,7 @@ def display(value: object) -> str:
        or hide terminal output. ASCII escapes also keep column widths
        predictable without a dependency for measuring emoji or East Asian text.
     """
-    text = str(value)
-    for rule in RULES:
-        # `pattern.sub(function, text)` replaces every match with whatever
-        # the function returns for it; here, the masked version.
-        text = rule.pattern.sub(lambda match: mask(match.group(0)), text)
+    text = redact(value)
     # Keep ordinary printable characters (codes 32 to 126) as they are, and
     # write anything else as an escape like \x1b or \u4e2d. `ascii(char)`
     # gives the escape in quotes; [1:-1] drops the quotes. Backslashes are
@@ -146,6 +156,76 @@ def mask(secret: str) -> str:
     if hidden_count > MAX_HIDDEN_CHARS:
         return secret[:VISIBLE_CHARS] + "*" * MAX_HIDDEN_CHARS + f"...({len(secret)} chars)"
     return secret[:VISIBLE_CHARS] + "*" * hidden_count
+
+
+# The version of the JSON output's layout. If the layout ever changes in a
+# way that could break programs reading it, this number goes up, so those
+# programs can tell which layout they're getting.
+JSON_FORMAT_VERSION = 1
+
+
+def json_report(findings: list[Finding], ids: list[str], suppressed: int,
+                issues: list[ScanIssue]) -> str:
+    """Build the --json output: one JSON document describing the whole scan.
+
+    Other programs (CI systems, dashboards, scripts) can read JSON reliably,
+    unlike the human-friendly columns. Layout:
+
+        {
+          "version": 1,
+          "findings": [
+            {"file": "config.py", "line": 3, "end_line": 3,
+             "rule": "AWS Access Key ID", "rule_id": "aws-access-key-id",
+             "match": "AKIA****************", "id": "<64-character ID>",
+             "placeholder": null}
+          ],
+          "summary": {"findings": 1, "files": 1, "suppressed": 0, "skipped": 0},
+          "skipped": [{"path": "logo.png", "reason": "binary file", "error": false}]
+        }
+
+    - "match" is ALWAYS masked, exactly like the normal output.
+    - "placeholder" is the reason a finding is a recognized placeholder
+      (only shown with --include-placeholders), otherwise null.
+    - "suppressed" counts findings hidden as placeholders, by the ignore
+      file, or by secretscan:ignore comments.
+    - "file" and "path" are masked too (a file can be named after a key),
+      but not escaped: JSON has its own safe way to write any character.
+
+    `ids[0]` belongs to `findings[0]`, and so on.
+    """
+    report = {
+        "version": JSON_FORMAT_VERSION,
+        "findings": [
+            {
+                "file": redact(finding.path),
+                "line": finding.line_number,
+                # `a or b`: the end line if known, otherwise the start line.
+                "end_line": finding.end_line_number or finding.line_number,
+                "rule": finding.rule_name,
+                "rule_id": finding.rule_id,
+                "match": mask(finding.secret),
+                "id": finding_id_value,
+                "placeholder": finding.placeholder_reason,
+            }
+            # `zip` pairs each finding with its ID.
+            for finding, finding_id_value in zip(findings, ids)
+        ],
+        "summary": {
+            "findings": len(findings),
+            # A set throws away duplicates, so this counts DIFFERENT files.
+            "files": len({finding.path for finding in findings}),
+            "suppressed": suppressed,
+            "skipped": len(issues),
+        },
+        "skipped": [
+            {"path": redact(issue.path), "reason": issue.reason, "error": issue.error}
+            for issue in issues
+        ],
+    }
+    # `indent=2` makes it readable for people too. The default
+    # ensure_ascii=True writes any unusual character as a \u escape, so the
+    # output can't contain raw control characters.
+    return json.dumps(report, indent=2)
 
 
 def print_findings(findings: list[Finding], ids: list[str] | None = None) -> None:
@@ -454,6 +534,13 @@ def build_parser() -> argparse.ArgumentParser:
         f"{IGNORE_FILE_NAME} file)",
     )
 
+    # Print one JSON document instead of columns, for other programs to read.
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        help="print the results as JSON (secrets still masked) for other programs",
+    )
+
     # Go through the findings one by one, asking whether to ignore each one.
     parser.add_argument(
         "--review",
@@ -566,6 +653,10 @@ def run(argv: list[str] | None = None) -> int:
     # --review saves answers to the ignore file, so it can't be combined with
     # "use no ignore file". And it asks questions, so a person must be there
     # to answer them.
+    # --review asks questions on the normal output, which would break the
+    # JSON document that --json promises to print there.
+    if args.review and args.json:
+        parser.error("--review can't be used with --json")
     if args.review and args.no_ignore:
         parser.error("--review can't be used with --no-ignore "
                      "(there'd be no ignore file to save your answers to)")
@@ -748,10 +839,16 @@ def run(argv: list[str] | None = None) -> int:
         return config_error("files changed during the review, so these results "
                             "may be out of date; run secretscan again")
 
+    # With --json, the normal output gets ONE JSON document and nothing
+    # else, so a program can always read it. Notices still go to stderr.
+    if args.json:
+        print(json_report(reportable, reportable_ids,
+                          len(placeholders) + ignored_count + inline_count, issues))
+
     # Stage 5: print the findings (if there are any), then a blank line to
     # separate them from the summary. print_findings can't handle an empty
     # list, because there'd be nothing to measure the columns from.
-    if reportable:
+    if reportable and not args.json:
         if args.show_ids:
             print_findings(reportable, reportable_ids)
         else:
@@ -761,16 +858,18 @@ def run(argv: list[str] | None = None) -> int:
     # Stage 6: always finish with a summary, so the user knows the scan
     # really ran, even when nothing was found.
     anything_hidden = bool(placeholders) or ignored_count > 0 or inline_count > 0 or bool(issues)
-    print(summary(reportable, anything_hidden=anything_hidden))
+    if not args.json:
+        print(summary(reportable, anything_hidden=anything_hidden))
 
     # If anything was hidden, say how much, and how to see it. Hiding
     # things silently would leave the user no way to double-check us.
-    if placeholders:
+    # (With --json, the counts are in the JSON summary instead.)
+    if placeholders and not args.json:
         print(
             f"Suppressed {plural(len(placeholders), 'recognized placeholder')} "
             "(use --include-placeholders to see)."
         )
-    if ignored_count:
+    if ignored_count and not args.json:
         print(
             f"Ignored {plural(ignored_count, 'finding')} listed in {display(ignore_path)} "
             "(use --no-ignore to see)."
@@ -782,7 +881,7 @@ def run(argv: list[str] | None = None) -> int:
     for extra in unused_ignore_files:
         print(f"Notice: {display(extra)} is not used by this scan; {in_use}.", file=sys.stderr)
 
-    if inline_count:
+    if inline_count and not args.json:
         print(f"Ignored {plural(inline_count, 'inline finding')} "
               "(use --include-inline-ignored to see).")
     # List every skipped path and why, on the error output (stderr), so a
