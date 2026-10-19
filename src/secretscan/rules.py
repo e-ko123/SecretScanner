@@ -397,12 +397,25 @@ PRIVATE_KEY = Rule(
 # Inside the value, a backslash consumes the next character as one pair; the
 # other alternative consumes one non-backslash character unless it ends the
 # string. This handles escaped quotes without crossing a line boundary.
+# The variable/property names that count as "this holds a secret". Shared by
+# the quoted rule below and the unquoted config-file rule further down.
+# Password-style names go in the `password_name` group, which the scanner
+# treats as strong context (always reported, see scanner.py). Longer names
+# come before shorter ones that start the same way ("password" before
+# "pass"), so the longest one is tried first. "pass" only counts as a whole
+# name part: the rule needs "=" or ":" right after the name, so words like
+# "passport" or "compass" don't match.
+SECRET_NAMES = (
+    r"(?:(?P<password_name>password|passphrase|passwd|pass|pwd)"
+    r"|secret|api[_-]?key|access[_-]?token|auth[_-]?token|client[_-]?secret)"
+)
+
 GENERIC_SECRET = Rule(
     name="Generic Password or Secret",
     pattern=re.compile(
         r"(?<![\w-])(?P<key_quote>[\"']?)"
         r"(?:[a-z0-9]+[_-])*"
-        r"(?:(?P<password_name>password|passwd|pwd)|secret|api[_-]?key|access[_-]?token|auth[_-]?token|client[_-]?secret)"
+        + SECRET_NAMES +
         r"(?P=key_quote)[ \t]*(?::|=(?!=))[ \t]*"
         r"(?P<value_quote>[\"'])(?P<secret>(?:\\[^\r\n]|(?!(?P=value_quote))[^\\\r\n])*)"
         r"(?P=value_quote)",
@@ -424,6 +437,94 @@ WEAK_PASSWORD_ASSIGNMENT = replace(
 )
 
 
+# ---------------------------------------------------------------------------
+# Unquoted values in config files (env files, shell scripts, YAML, Docker)
+# ---------------------------------------------------------------------------
+# These files usually don't put quotes around values:
+#
+#     PASSWORD=password123                 (an env file)
+#     export DB_PASSWORD=password123       (shell script)
+#     password: password123                (YAML, e.g. docker-compose.yml)
+#     - POSTGRES_PASSWORD=password123      (a YAML list item)
+#     ENV DB_PASSWORD=password123          (Dockerfile)
+#     db.password=password123              (.properties file)
+#
+# This rule is used ONLY for config-type files (see is_config_file in
+# scanner.py). In code it would cause false alarms: `password: str` is a
+# normal Python type hint, and `password = user_input` sets a variable.
+#
+# The pattern, piece by piece (it must match from the START of the line):
+#   ^[ \t]*                 optional indentation (YAML nests with spaces).
+#   (?:(?:export|ENV|set)[ \t]+|-[ \t]+)?
+#                           optionally "export ", "ENV ", "set ", or "- ".
+#   (?:[a-z0-9]+[_.-])*     name parts before the main one, like DB_ or db.
+#   SECRET_NAMES            the secret-ish name (see above).
+#   [ \t]*[=:][ \t]*        "=" or ":", with optional spaces around it.
+#   (?P<secret>...)         the value. Its first character must NOT be a
+#                           space, a quote (quoted values are the other rule's
+#                           job), # or $ or ` (comments, variables, commands),
+#                           or YAML's special characters ! & * | > { [.
+#                           Then everything to the end of the line;
+#                           scanner.py trims a trailing " # comment" and spaces.
+# Taking "the rest of the line" in one greedy run, instead of making the regex
+# decide where the value stops, keeps it fast. A regex that must choose
+# between "part of the value" and "trailing spaces" can slow down badly on a
+# line full of spaces (see SPLIT_LITERAL in scanner.py).
+GENERIC_SECRET_UNQUOTED = Rule(
+    name="Generic Password or Secret",
+    pattern=re.compile(
+        r"^[ \t]*(?:(?:export|ENV|set)[ \t]+|-[ \t]+)?"
+        r"(?:[a-z0-9]+[_.-])*"
+        + SECRET_NAMES +
+        r"[ \t]*[=:][ \t]*"
+        r"(?P<secret>[^\s\"'#$`!&*|>{\[][^\r\n]*)",
+        re.IGNORECASE,
+    ),
+    # Same ID as the quoted rule: it's the same kind of finding, so
+    # dismissals and labels work the same way for both.
+    id="generic-secret",
+)
+
+# Extra rules used only for config-type files (see is_config_file in scanner.py).
+CONFIG_RULES = [GENERIC_SECRET_UNQUOTED]
+
+
+# ---------------------------------------------------------------------------
+# Password inside a URL (database links, git remotes, etc.)
+# ---------------------------------------------------------------------------
+# Apps often store a whole login as one link:
+#
+#     mysql://admin:<password>@db.example.com/app
+#     https://user:<token>@git.example.com/repo.git
+#
+# (Written with <password> placeholders: the scanner skips values in angle
+# brackets, so this comment doesn't flag itself.)
+#
+# The part between "user:" and "@" is the password. Only that part becomes
+# the finding's secret, so the masked preview and the ID are about it.
+#
+# The pattern, piece by piece:
+#   [A-Za-z][A-Za-z0-9+.-]*://  the scheme, like "mysql://" or "https://".
+#   [^\s:/?#@'"]+               the username: no spaces, and none of the
+#                               characters that separate parts of a URL.
+#   :                           the colon between username and password.
+#   (?P<secret>[^\s/?#@'"]+)    the password (it may contain ":").
+#   @[^\s/?#@'"]+               "@" and the host name.
+# A link with no password (ssh://git@github.com) or with only a port
+# (http://localhost:8080/) has no "user:password@" part, so it doesn't match.
+URL_PASSWORD = Rule(
+    name="Password in URL",
+    pattern=re.compile(
+        r"[A-Za-z][A-Za-z0-9+.-]*://[^\s:/?#@'\"]+:(?P<secret>[^\s/?#@'\"]+)@[^\s/?#@'\"]+"
+    ),
+    id="url-password",
+    # Treated like a password assignment: always reported, even when simple,
+    # because a password in a URL is an actual password, not a guess.
+    password_assignment=True,
+)
+WEAK_URL_PASSWORD = replace(URL_PASSWORD, name="Possible Weak Password in URL")
+
+
 # Every rule the scanner uses. The scanner loops over this list, so adding
 # a new rule here is all it takes for it to be checked.
 RULES = [
@@ -439,4 +540,5 @@ RULES = [
     OPENAI_API_KEY,
     PRIVATE_KEY,
     GENERIC_SECRET,
+    URL_PASSWORD,
 ]

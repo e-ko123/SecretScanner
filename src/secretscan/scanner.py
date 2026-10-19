@@ -38,7 +38,10 @@ from secretscan.entropy import MIN_SECRET_ENTROPY, MIN_SECRET_LENGTH, shannon_en
 from secretscan.placeholders import placeholder_reason
 
 # The list of rules to check, and the Rule type, from rules.py.
-from secretscan.rules import RULES, PASSWORD_ASSIGNMENT, WEAK_PASSWORD_ASSIGNMENT, Rule
+from secretscan.rules import (
+    CONFIG_RULES, GENERIC_SECRET_UNQUOTED, PASSWORD_ASSIGNMENT, RULES, URL_PASSWORD,
+    WEAK_PASSWORD_ASSIGNMENT, WEAK_URL_PASSWORD, Rule,
+)
 
 
 # Folders we never look inside. They hold tools, downloaded dependencies,
@@ -343,10 +346,49 @@ def has_inline_ignore(line: str, matches: list[tuple[Rule, str]]) -> bool:
 # Recognize complete environment/template references, not substrings inside a
 # real value. Function calls (os.getenv, process.env, ...) already do not match
 # the quoted-literal assignment rule at all.
+#
+# Each alternative is one way of saying "the real value comes from elsewhere":
+#   \$\{\{[^{}\r\n]+\}\}      ${{ secrets.DB_PASSWORD }}  (GitHub Actions)
+#   \$\{[^{}\r\n]+\}          ${DB_PASSWORD}              (shell, Docker Compose)
+#   \$[A-Za-z_][A-Za-z0-9_]*  $DB_PASSWORD                (shell)
+#   \$\([^()\r\n]*\)          $(cat password.txt)         (shell: run a command)
+#   \{\{[^{}\r\n]+\}\}        {{ db_password }}           (templates: Jinja, Helm)
+#   %[A-Za-z_][A-Za-z0-9_]*%  %DB_PASSWORD%               (Windows)
+#   <[^<>\r\n]+>              <your-password>             (documentation)
+# The GitHub form comes first: it starts like ${...} but contains braces.
+# The last one isn't a reference, but it's the usual way docs write "put your
+# own value here", and no real password is written in angle brackets.
 ENVIRONMENT_REFERENCE = re.compile(
-    r"(?:\$\{[^{}\r\n]+\}|\$[A-Za-z_][A-Za-z0-9_]*"
-    r"|\{\{[^{}\r\n]+\}\}|%[A-Za-z_][A-Za-z0-9_]*%)"
+    r"(?:\$\{\{[^{}\r\n]+\}\}|\$\{[^{}\r\n]+\}|\$[A-Za-z_][A-Za-z0-9_]*"
+    r"|\$\([^()\r\n]*\)|\{\{[^{}\r\n]+\}\}|%[A-Za-z_][A-Za-z0-9_]*%"
+    r"|<[^<>\r\n]+>)"
 )
+
+# Rules whose matches are judged by their VALUE (length, randomness,
+# references) rather than by a provider's fixed key shape.
+VALUE_JUDGED_RULES = {"generic-secret", "url-password"}
+
+# Unquoted YAML/config words that mean "no value", not a password.
+EMPTY_CONFIG_VALUES = {"null", "~", "none", "nil", "true", "false"}
+
+# File types where values are usually written without quotes, so the
+# unquoted config rule (CONFIG_RULES in rules.py) applies. Code files are
+# left out on purpose: `password: str` is a normal Python type hint.
+CONFIG_SUFFIXES = {
+    ".env", ".yml", ".yaml", ".ini", ".cfg", ".conf", ".properties",
+    ".sh", ".bash", ".zsh",
+}
+
+
+def is_config_file(path: Path) -> bool:
+    """True for env files, shell scripts, YAML, INI-style files and Dockerfiles."""
+    name = path.name
+    return (
+        path.suffix.lower() in CONFIG_SUFFIXES
+        # Env files are often named ".env", ".env.local", ".env.production".
+        or name == ".env" or name.startswith(".env.")
+        or name == "Dockerfile" or name.startswith("Dockerfile.")
+    )
 
 
 def scan_line(line: str, rules: list[Rule] = RULES, include_inline: bool = False) -> list[tuple[Rule, str]]:
@@ -368,19 +410,33 @@ def scan_line(line: str, rules: list[Rule] = RULES, include_inline: bool = False
         for match in rule.pattern.finditer(line):
             group = "secret" if "secret" in rule.pattern.groupindex else 0
             secret = match.group(group)
-            if rule.id == "generic-secret":
+            if rule is GENERIC_SECRET_UNQUOTED:
+                # The unquoted rule takes the rest of the line (see rules.py).
+                # Cut off a trailing comment: " #" starts one in env files,
+                # shell, and YAML (a "#" with no space before it can be part
+                # of the value). Then trim spaces.
+                secret = re.split(r"[ \t]#", secret, maxsplit=1)[0].rstrip()
+                if secret.lower() in EMPTY_CONFIG_VALUES:
+                    continue
+            if rule.id in VALUE_JUDGED_RULES:
                 if ENVIRONMENT_REFERENCE.fullmatch(secret):
                     continue
                 if not secret:
                     # An empty configuration value is not a stored password.
                     continue
-                is_password = match.group("password_name") is not None
+                # A password in a URL counts as a password, like a variable
+                # named password. Only the generic rules have that group.
+                is_password = (rule.id == "url-password"
+                               or match.group("password_name") is not None)
                 reason = placeholder_reason(rule, secret)
                 below_threshold = (
                     len(secret) < MIN_SECRET_LENGTH
                     or shannon_entropy(secret) < MIN_SECRET_ENTROPY
                 )
-                if is_password:
+                if rule.id == "url-password":
+                    # Always reported; a simple-looking one gets the "weak" label.
+                    rule_for_match = WEAK_URL_PASSWORD if below_threshold else URL_PASSWORD
+                elif is_password:
                     # Password context bypasses the heuristic. A value such
                     # as changeme may be a deployed password, not an example.
                     rule_for_match = (
@@ -397,12 +453,13 @@ def scan_line(line: str, rules: list[Rule] = RULES, include_inline: bool = False
                 rule_for_match = rule
             candidates.append((rule_for_match, secret, match.span(group)))
 
-    provider_spans = [span for rule, _, span in candidates if rule.id != "generic-secret"]
+    provider_spans = [span for rule, _, span in candidates if rule.id not in VALUE_JUDGED_RULES]
     matches = []
     for rule, secret, (start, end) in candidates:
         # A provider-specific diagnosis is more useful than a second generic
-        # warning for the same value. Leave unrelated matches on the line alone.
-        if rule.id == "generic-secret" and any(
+        # warning for the same value (e.g. a GitHub token used as the
+        # password in a git URL). Leave unrelated matches on the line alone.
+        if rule.id in VALUE_JUDGED_RULES and any(
             start < other_end and other_start < end
             for other_start, other_end in provider_spans
         ):
@@ -582,10 +639,14 @@ def scan_bytes(data: bytes, path: Path, include_inline: bool = False) -> list[Fi
             end_line_number=end_line_number or line_number,
         ))
 
+    # Config-type files also get the unquoted-value rule (see is_config_file).
+    # `RULES + CONFIG_RULES` makes a new, longer list; RULES itself is unchanged.
+    rules = RULES + CONFIG_RULES if is_config_file(path) else RULES
+
     # `enumerate(lines, start=1)` gives us each line together with its
     # line number, counting from 1 instead of Python's usual 0.
     for line_number, line in enumerate(lines, start=1):
-        matches = scan_line(line, include_inline=True)
+        matches = scan_line(line, rules, include_inline=True)
 
         # Also look at the line with JSON \u escapes decoded, keeping only
         # keys the raw line didn't already show.
@@ -594,8 +655,8 @@ def scan_bytes(data: bytes, path: Path, include_inline: bool = False) -> list[Fi
             # Generic values should use the decoded text once, rather than
             # reporting both its escaped and decoded spelling. Keep existing
             # provider matches if decoding would obscure their original shape.
-            decoded_matches = scan_line(decoded, include_inline=True)
-            matches = [m for m in matches if m[0].id != "generic-secret"]
+            decoded_matches = scan_line(decoded, rules, include_inline=True)
+            matches = [m for m in matches if m[0].id not in VALUE_JUDGED_RULES]
             already = {(rule.id, secret) for rule, secret in matches}
             matches += [m for m in decoded_matches if (m[0].id, m[1]) not in already]
 
@@ -629,7 +690,7 @@ def scan_bytes(data: bytes, path: Path, include_inline: bool = False) -> list[Fi
                 # to identify it (see private_key_block), so it's not joined.
                 # Generic matching needs the assignment name too, so this
                 # provider-only fragment pass cannot reconstruct it safely.
-                if rule.id in ("private-key", "generic-secret"):
+                if rule.id in ("private-key", "generic-secret", "url-password"):
                     continue
                 for match in rule.pattern.finditer(left + right):
                     # Only matches that cross the join are new; keys entirely

@@ -488,7 +488,8 @@ This shows recognized placeholders, external dismissals, and inline dismissals w
 | **OpenAI API key** | `sk-p****************************…` | Legacy `sk-` plus 48 alphanumeric characters, or `sk-proj-` / `sk-svcacct-` plus a token body |
 | **Anthropic API key** | `sk-a****************************…` | Starts with `sk-ant-` |
 | **Private key** | `----**********************` | A `-----BEGIN ... PRIVATE KEY-----` block (RSA, EC, DSA, OpenSSH, encrypted, PGP) or a PuTTY v2/v3 key file, when key data follows the header |
-| **Generic password / secret** | `q8#L********` | Nonempty quoted password assignments; broader secret names require at least 12 characters and entropy of at least 3.5 bits per character (see below) |
+| **Generic password / secret** | `q8#L********` | Nonempty password assignments (quoted, or unquoted in config files like `.env`); broader secret names require at least 12 characters and entropy of at least 3.5 bits per character (see below) |
+| **Password in URL** | `pass*******` | The password in links like `mysql://user:<password>@host` |
 
 ### What it skips
 
@@ -537,7 +538,7 @@ Every remaining finding gets an ID: a SHA-256 hash of the rule, the file's relat
 Provider keys have recognizable prefixes. Other passwords and secrets do not,
 so the generic rule combines an assignment name with character variety.
 
-It recognizes `password`, `passwd`, `pwd`, `secret`, `api_key`, `access_token`,
+It recognizes `password`, `passphrase`, `passwd`, `pass`, `pwd`, `secret`, `api_key`, `access_token`,
 `auth_token`, and `client_secret`, ignoring letter case. `apiKey`, `accessToken`,
 `authToken`, and `clientSecret` work too. API/key and token names also accept
 hyphens; underscore/hyphen prefixes allow names such as `DATABASE_PASSWORD`
@@ -545,14 +546,32 @@ and `service_client_secret`.
 
 The name may be quoted (JSON/YAML properties) or unquoted (variables). The
 operator must be `=` or `:`, and the value must be a **single- or double-quoted
-literal on the same line**. Unquoted `.env` values, type annotations between
-the name and operator, triple-quoted strings, interpolated strings, and
-arbitrary expressions are not supported. This is pattern matching, not a
+literal on the same line**, except in config-type files (below). `pass` only
+counts as a whole name part, so `bypass`, `compass`, and `passport` don't match.
+
+**Config files allow unquoted values.** In env files (`.env`, `.env.local`,
+`prod.env`), shell scripts (`.sh`, `.bash`, `.zsh`), YAML, `.ini`/`.cfg`/`.conf`,
+`.properties`, and Dockerfiles, lines like `PASSWORD=value`,
+`export DB_PASSWORD=value`, `password: value`, `- POSTGRES_PASSWORD=value`, and
+`ENV DB_PASSWORD=value` are checked too. A trailing ` # comment` is not part of
+the value. YAML's empty words (`null`, `~`, `true`, ...), YAML tags like `!vault`,
+and values starting with `$` (variables, `$(command)`) are skipped. Code files
+don't get this rule, because there `password: str` is a type hint.
+
+**Passwords in URLs** like `mysql://admin:<password>@db.example.com/app` are
+reported as **Password in URL** (or **Possible Weak Password in URL** for a
+simple one). Only the password part is masked and fingerprinted. Links with no
+password (`ssh://git@github.com`) or only a port don't match. When the
+password is a provider token (a GitHub token in a git URL), only the token
+finding is reported.
+
+Type annotations between the name and operator, triple-quoted strings,
+interpolated strings, and arbitrary expressions are not supported. This is pattern matching, not a
 language parser; quoted fragments in expressions may still be reported.
 
 Only the **value** is scored, fingerprinted, and masked. Detection uses two paths:
 
-- **Password context:** `password`, `passwd`, `pwd`, and their prefixed forms
+- **Password context:** `password`, `passphrase`, `passwd`, `pass`, `pwd`, and their prefixed forms
   report every **nonempty quoted literal**, regardless of length or entropy.
   Short/low-entropy values and known instructional values are labeled
   **Possible Weak Password or Placeholder**. Other values use **Hard-coded
@@ -586,8 +605,11 @@ Other short or low-entropy values under broader secret names are not candidates,
 even with that switch. **Password assignments are never automatically hidden by
 this placeholder list.** Use review or an explicit inline marker for examples.
 
-Complete quoted references such as `${DATABASE_PASSWORD}`, `$DATABASE_PASSWORD`,
-`{{ secrets.DATABASE_PASSWORD }}`, and `%DATABASE_PASSWORD%` are excluded.
+Complete references such as `${DATABASE_PASSWORD}`, `$DATABASE_PASSWORD`,
+GitHub Actions' `${{ secrets.DATABASE_PASSWORD }}`, `$(cat password.txt)`,
+`{{ secrets.DATABASE_PASSWORD }}`, and `%DATABASE_PASSWORD%` are excluded, as
+are documentation placeholders written entirely in angle brackets
+(`<your-password>`). A value that only *contains* such text is still checked.
 Assignments to calls such as `os.getenv(...)` are not quoted literals and do
 not match. Provider-specific rules never depend on the entropy threshold;
 when they overlap a generic candidate, only the provider finding is reported.
