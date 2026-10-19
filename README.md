@@ -134,10 +134,14 @@ If you see a help message listing the available options, you're done. 🎉
 
 ## Quick start
 
+Go to **your own project's folder** (not the `SecretScanner` folder you installed from), then scan it:
+
 ```bash
-# Scan the folder you're currently in
+cd path/to/your/project
 secretscan
 ```
+
+> If you scan the `SecretScanner` folder itself, its tests contain example passwords on purpose. They're listed in the repo's own `.secretscanignore` with a reason each, so they show up only as an "Ignored N findings" line.
 
 You don't need to change your code or add special comments first: common placeholder keys are skipped automatically, and any remaining false alarm can be dismissed in a separate file (see [Handling false alarms](#handling-false-alarms)).
 
@@ -260,7 +264,11 @@ secretscan install-hook --force
 The installer honors `core.hooksPath` and linked worktrees. A configured shared
 hook directory affects every repository using it. The hook remembers the
 installing Python interpreter, so activating its virtual environment later is
-unnecessary. Install the package first (`pip install .` or `pip install -e .`),
+unnecessary **for the hook**. Running `secretscan` yourself (for example
+`secretscan --review` after a blocked commit) still needs the command on your
+PATH: activate the virtual environment first
+(`source path/to/SecretScanner/.venv/bin/activate`), or install with `pipx`
+(see Installation) so `secretscan` works in every terminal. Install the package first (`pip install .` or `pip install -e .`),
 and reinstall the hook if you move or remove that Python environment. Scanning
 errors also block commits, with a separate message explaining that the scan
 could not finish.
