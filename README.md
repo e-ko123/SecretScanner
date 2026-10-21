@@ -6,8 +6,9 @@
 
 It's a small, dependency-free command-line tool written in Python, inspired by professional tools like [gitleaks](https://github.com/gitleaks/gitleaks) and [GitGuardian](https://www.gitguardian.com/).
 
-<!-- TODO: replace with a GIF of a commit being blocked -->
-> 📸 *Demo GIF coming soon: a `git commit` being blocked because it contained an API key.*
+![A git commit containing an AWS key and a password is blocked by secretscan; after moving both into environment variables, the commit succeeds.](demo/demo.gif)
+
+*A commit with a hard-coded AWS key and password is blocked (secrets shown masked); after moving them into environment variables, it goes through. Recorded with [VHS](https://github.com/charmbracelet/vhs) from [`demo/demo.tape`](demo/demo.tape).*
 
 ---
 
