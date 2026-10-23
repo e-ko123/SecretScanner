@@ -228,6 +228,19 @@ def json_report(findings: list[Finding], ids: list[str], suppressed: int,
     return json.dumps(report, indent=2)
 
 
+def terminal_color(text: str, code: str) -> str:
+    """Add trusted ANSI color only when stdout is an interactive terminal.
+
+    NO_COLOR (even an empty value) lets users opt out. TERM=dumb identifies a
+    terminal that cannot render colors. JSON bypasses this function entirely;
+    redirected output stays plain because isatty() is false for files/pipes.
+    """
+    if "NO_COLOR" in os.environ or os.environ.get("TERM") == "dumb" or not sys.stdout.isatty():
+        return text
+    # Reset immediately after each line so later commands keep their own colors.
+    return f"\x1b[{code}m{text}\x1b[0m"
+
+
 def print_findings(findings: list[Finding], ids: list[str] | None = None) -> None:
     """Print one line per finding, lined up in neat columns.
 
@@ -273,7 +286,7 @@ def print_findings(findings: list[Finding], ids: list[str] | None = None) -> Non
             line += masked[index]
         if finding.placeholder_reason:
             line += f"   (recognized placeholder: {finding.placeholder_reason})"
-        print(line)
+        print(terminal_color(line, "33" if finding.placeholder_reason else "31"))
 
 
 def plural(count: int, word: str) -> str:
@@ -315,6 +328,12 @@ def summary(findings: list[Finding], anything_hidden: bool = False) -> str:
         f"Found {plural(len(findings), 'possible secret')} "
         f"in {plural(file_count, 'file')}."
     )
+
+
+def print_summary(findings: list[Finding], anything_hidden: bool = False) -> None:
+    """Print red for findings, yellow for a qualified result, or green for clean."""
+    code = "31" if findings else ("33" if anything_hidden else "32")
+    print(terminal_color(summary(findings, anything_hidden), code))
 
 
 # The reason saved in the ignore file when the user dismisses a finding
@@ -859,7 +878,7 @@ def run(argv: list[str] | None = None) -> int:
     # really ran, even when nothing was found.
     anything_hidden = bool(placeholders) or ignored_count > 0 or inline_count > 0 or bool(issues)
     if not args.json:
-        print(summary(reportable, anything_hidden=anything_hidden))
+        print_summary(reportable, anything_hidden=anything_hidden)
 
     # If anything was hidden, say how much, and how to see it. Hiding
     # things silently would leave the user no way to double-check us.

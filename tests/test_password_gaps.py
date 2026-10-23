@@ -73,7 +73,9 @@ def test_trailing_comment_is_not_part_of_the_value(tmp_path):
     "PASSWORD=",
 ])
 def test_config_lines_without_a_stored_password_are_not_findings(tmp_path, line):
-    assert findings(tmp_path, ".env", line + "\n") == []
+    # Null/boolean scalar semantics belong to YAML, not env-file strings.
+    filename = "config.yaml" if line.startswith("password:") else ".env"
+    assert findings(tmp_path, filename, line + "\n") == []
 
 
 def test_unquoted_rule_does_not_apply_to_code_files(tmp_path):
@@ -126,7 +128,6 @@ def test_random_password_in_a_url_is_not_labeled_weak():
     "ssh://git@github.com/owner/repo.git",          # username only
     "http://localhost:8080/path",                   # port, no login
     "https://user:${DB_PASSWORD}@db.example.com",   # a variable reference
-    "mysql://admin:<password>@db.example.com/app",  # a documentation placeholder
     "see https://example.com/a:b/c@d",              # ":" and "@" in the path
 ])
 def test_urls_without_a_stored_password_are_not_findings(line):
@@ -181,9 +182,10 @@ def test_github_actions_references_are_not_findings(line):
     assert scan_line(line) == []
 
 
-def test_angle_bracket_placeholders_are_not_findings():
-    # Docs write "put your own value here" as <...>; no real password looks like that.
-    assert scan_line('password = "<your-password>"') == []
+def test_angle_bracket_passwords_need_explicit_review():
+    # Documentation conventions are not proof: angle brackets are legal in a
+    # real password too, so an example needs an explicit review dismissal.
+    assert len(scan_line('password = "<your-password>"')) == 1
     # A value that merely CONTAINS angle brackets is still reported.
     assert scan_line('password = "ab<c>d"') != []
 

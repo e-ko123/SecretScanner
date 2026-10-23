@@ -476,7 +476,7 @@ GENERIC_SECRET_UNQUOTED = Rule(
         r"^[ \t]*(?:(?:export|ENV|set)[ \t]+|-[ \t]+)?"
         r"(?:[a-z0-9]+[_.-])*"
         + SECRET_NAMES +
-        r"[ \t]*[=:][ \t]*"
+        r"[ \t]*(?P<assignment>[=:])[ \t]*"
         r"(?P<secret>[^\s\"'#$`!&*|>{\[][^\r\n]*)",
         re.IGNORECASE,
     ),
@@ -497,8 +497,8 @@ CONFIG_RULES = [GENERIC_SECRET_UNQUOTED]
 #     mysql://admin:<password>@db.example.com/app
 #     https://user:<token>@git.example.com/repo.git
 #
-# (Written with <password> placeholders: the scanner skips values in angle
-# brackets, so this comment doesn't flag itself.)
+# Angle brackets are documentation conventions, not proof of a fake value.
+# Literal URL passwords are reported even when they use those characters.
 #
 # The part between "user:" and "@" is the password. Only that part becomes
 # the finding's secret, so the masked preview and the ID are about it.

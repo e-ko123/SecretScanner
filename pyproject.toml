@@ -1,14 +1,15 @@
 [build-system]
-requires = ["setuptools>=64"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "secretscan"
 version = "0.1.0"
-description = "Find API keys and private keys accidentally left in your code."
+description = "Find API keys, hard-coded passwords, and private keys before you commit."
 readme = "README.md"
 requires-python = ">=3.9"
-license = { text = "MIT" }
+license = "MIT"
+license-files = ["LICENSE"]
 authors = [{ name = "Ethan Ko" }]
 dependencies = []
 

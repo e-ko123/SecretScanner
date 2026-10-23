@@ -358,3 +358,55 @@ def test_weak_password_blocks_real_commit_until_explicitly_dismissed(repo, value
         {"id": ident, "reason": "Reviewed test fixture"},
     ]}), ".secretscanignore")
     git(repo, "commit", "-qm", "reviewed")
+
+
+@pytest.mark.parametrize("filename, contents, rule_id, value", [
+    (".env", "PASSWORD=false\n", "generic-secret", "false"),
+    ("app.properties", "db.password=null\n", "generic-secret", "null"),
+    ("app.py", 'password = "<my-password>"\n', "generic-secret", "<my-password>"),
+    ("app.json", '{"password":"ab' + r'\u000a' + 'cd"}', "generic-secret", "ab\ncd"),
+    ("app.json", '{"pass' + r'\u0077' + 'ord":"ab' + r'\u0022' + 'cd"}', "generic-secret", 'ab"cd'),
+    ("app.py", 'password = "mysql://user:' + 'summer2024' + '@localhost/db"', "url-password", "summer2024"),
+])
+def test_detection_fixes_block_actual_commits_and_support_staged_dismissals(
+        repo, filename, contents, rule_id, value, capsys):
+    # Exercise the index reader, masked JSON, fingerprint, and real hook. Every
+    # case should produce exactly one finding, including the nested URL case.
+    stage(repo, contents, filename)
+    assert main(["--staged", "--json"]) == 1
+    report = json.loads(capsys.readouterr().out)
+    [found] = report["findings"]
+    assert found["rule_id"] == rule_id
+    assert found["id"] == fingerprint(rule_id, filename, value)
+    assert value not in found["match"]
+    assert main(["install-hook"]) == 0
+    result = git(repo, "commit", "-m", "blocked", check=False)
+    assert result.returncode != 0
+    assert b"Commit blocked: secretscan found" in result.stderr
+    # A deliberate dismissal still works; decoded values must use the same ID
+    # in normal scans, staged output, and the hook's saved-ignore filtering.
+    stage(repo, json.dumps({"version": 1, "findings": [
+        {"id": found["id"], "reason": "Reviewed synthetic regression example"},
+    ]}), ".secretscanignore")
+    git(repo, "commit", "-qm", "reviewed")
+
+
+def test_yaml_empty_mapping_values_do_not_block_commit(repo):
+    stage(repo, "password: null\nDB_PASSWORD: false\n", "config.yaml")
+    assert main(["install-hook"]) == 0
+    git(repo, "commit", "-qm", "YAML empty values")
+
+
+def test_staged_colors_respect_json(repo, capsys, monkeypatch):
+    # Staged scans must use the same display policy as normal file scans.
+    import secretscan.cli as cli
+    monkeypatch.setattr(cli.sys.stdout, "isatty", lambda: True)
+    monkeypatch.delenv("NO_COLOR", raising=False)
+    monkeypatch.setenv("TERM", "xterm-256color")
+    stage(repo, KEY)
+    assert main(["--staged"]) == 1
+    assert "\x1b[31m" in capsys.readouterr().out
+    assert main(["--staged", "--json"]) == 1
+    output = capsys.readouterr().out
+    assert "\x1b[" not in output
+    assert json.loads(output)["summary"]["findings"] == 1

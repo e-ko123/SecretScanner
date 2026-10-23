@@ -354,14 +354,12 @@ def has_inline_ignore(line: str, matches: list[tuple[Rule, str]]) -> bool:
 #   \$\([^()\r\n]*\)          $(cat password.txt)         (shell: run a command)
 #   \{\{[^{}\r\n]+\}\}        {{ db_password }}           (templates: Jinja, Helm)
 #   %[A-Za-z_][A-Za-z0-9_]*%  %DB_PASSWORD%               (Windows)
-#   <[^<>\r\n]+>              <your-password>             (documentation)
 # The GitHub form comes first: it starts like ${...} but contains braces.
-# The last one isn't a reference, but it's the usual way docs write "put your
-# own value here", and no real password is written in angle brackets.
+# Angle-bracket values are literals, not references; review can dismiss examples.
 ENVIRONMENT_REFERENCE = re.compile(
     r"(?:\$\{\{[^{}\r\n]+\}\}|\$\{[^{}\r\n]+\}|\$[A-Za-z_][A-Za-z0-9_]*"
     r"|\$\([^()\r\n]*\)|\{\{[^{}\r\n]+\}\}|%[A-Za-z_][A-Za-z0-9_]*%"
-    r"|<[^<>\r\n]+>)"
+    r")"
 )
 
 # Rules whose matches are judged by their VALUE (length, randomness,
@@ -369,7 +367,7 @@ ENVIRONMENT_REFERENCE = re.compile(
 VALUE_JUDGED_RULES = {"generic-secret", "url-password"}
 
 # Unquoted YAML/config words that mean "no value", not a password.
-EMPTY_CONFIG_VALUES = {"null", "~", "none", "nil", "true", "false"}
+EMPTY_CONFIG_VALUES = {"null", "~", "true", "false"}
 
 # File types where values are usually written without quotes, so the
 # unquoted config rule (CONFIG_RULES in rules.py) applies. Code files are
@@ -391,7 +389,8 @@ def is_config_file(path: Path) -> bool:
     )
 
 
-def scan_line(line: str, rules: list[Rule] = RULES, include_inline: bool = False) -> list[tuple[Rule, str]]:
+def scan_line(line: str, rules: list[Rule] = RULES, include_inline: bool = False,
+              yaml_config: bool = False) -> list[tuple[Rule, str]]:
     """Check one line of text against every rule.
 
     Returns a list of (rule, matched_text) pairs, one for each match.
@@ -402,6 +401,8 @@ def scan_line(line: str, rules: list[Rule] = RULES, include_inline: bool = False
     secretscan:ignore comment". scan_file uses it so it can count how many
     matches the comments hid, instead of losing track of them.
     """
+    # YAML scalar exclusions only apply to YAML mapping syntax. Other config
+    # formats store strings such as false and null as literal values.
     candidates = []
 
     for rule in rules:
@@ -416,9 +417,13 @@ def scan_line(line: str, rules: list[Rule] = RULES, include_inline: bool = False
                 # shell, and YAML (a "#" with no space before it can be part
                 # of the value). Then trim spaces.
                 secret = re.split(r"[ \t]#", secret, maxsplit=1)[0].rstrip()
-                if secret.lower() in EMPTY_CONFIG_VALUES:
+                if (yaml_config and match.group("assignment") == ":"
+                        and secret.lower() in EMPTY_CONFIG_VALUES):
                     continue
             if rule.id in VALUE_JUDGED_RULES:
+                # Decode only after finding the literal's boundaries. Escaped
+                # quotes/newlines belong to the value, not the source syntax.
+                secret = decode_json_escapes(secret)
                 if ENVIRONMENT_REFERENCE.fullmatch(secret):
                     continue
                 if not secret:
@@ -454,6 +459,7 @@ def scan_line(line: str, rules: list[Rule] = RULES, include_inline: bool = False
             candidates.append((rule_for_match, secret, match.span(group)))
 
     provider_spans = [span for rule, _, span in candidates if rule.id not in VALUE_JUDGED_RULES]
+    url_spans = [span for rule, _, span in candidates if rule.id == "url-password"]
     matches = []
     for rule, secret, (start, end) in candidates:
         # A provider-specific diagnosis is more useful than a second generic
@@ -463,6 +469,11 @@ def scan_line(line: str, rules: list[Rule] = RULES, include_inline: bool = False
             start < other_end and other_start < end
             for other_start, other_end in provider_spans
         ):
+            continue
+        # For an assignment whose value is a login URL, report the extracted
+        # URL password once. Keep independent passwords elsewhere on the line.
+        if (rule.id == "generic-secret" and URL_PASSWORD.pattern.match(secret)
+                and any(start <= a and b <= end for a, b in url_spans)):
             continue
         matches.append((rule, secret))
 
@@ -548,9 +559,21 @@ def bracket_depths(lines: list[str]) -> list[int]:
 JSON_ASCII_ESCAPE = re.compile(r"\\u00([0-7][0-9a-fA-F])")
 
 
-def decode_json_escapes(line: str) -> str:
-    # `int(text, 16)` reads hexadecimal; `chr` turns the number into a character.
-    return JSON_ASCII_ESCAPE.sub(lambda match: chr(int(match.group(1), 16)), line)
+def decode_json_escapes(line: str, preserve_structure: bool = False) -> str:
+    """Decode ASCII Unicode escapes, optionally keeping regex delimiters intact.
+
+    While locating assignments, preserve escaped quotes, backslashes, and line
+    breaks. Otherwise a character INSIDE a value could appear to close its
+    quotes or create a new source line. scan_line decodes the captured value
+    completely after its boundaries have been identified.
+    """
+    def decode(match):
+        character = chr(int(match.group(1), 16))
+        if preserve_structure and character in "\"'\\\r\n":
+            return match.group(0)
+        return character
+
+    return JSON_ASCII_ESCAPE.sub(decode, line)
 
 
 # ---------------------------------------------------------------------------
@@ -645,17 +668,18 @@ def scan_bytes(data: bytes, path: Path, include_inline: bool = False) -> list[Fi
 
     # `enumerate(lines, start=1)` gives us each line together with its
     # line number, counting from 1 instead of Python's usual 0.
+    yaml_config = path.suffix.lower() in {".yaml", ".yml"}
     for line_number, line in enumerate(lines, start=1):
-        matches = scan_line(line, rules, include_inline=True)
+        matches = scan_line(line, rules, include_inline=True, yaml_config=yaml_config)
 
         # Also look at the line with JSON \u escapes decoded, keeping only
         # keys the raw line didn't already show.
-        decoded = decode_json_escapes(line)
+        decoded = decode_json_escapes(line, preserve_structure=True)
         if decoded != line:
             # Generic values should use the decoded text once, rather than
             # reporting both its escaped and decoded spelling. Keep existing
             # provider matches if decoding would obscure their original shape.
-            decoded_matches = scan_line(decoded, rules, include_inline=True)
+            decoded_matches = scan_line(decoded, rules, include_inline=True, yaml_config=yaml_config)
             matches = [m for m in matches if m[0].id not in VALUE_JUDGED_RULES]
             already = {(rule.id, secret) for rule, secret in matches}
             matches += [m for m in decoded_matches if (m[0].id, m[1]) not in already]

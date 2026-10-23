@@ -34,11 +34,11 @@ It's a small, dependency-free command-line tool written in Python, inspired by p
 
 ## Project status
 
-🚧 **Work in progress.** Features are checked off as they are built and tested. Anything marked ***(planned)*** in this README is **not built yet**; it describes how that part will work once it is.
+**Version 0.1.0:** the core scanner, Git integration, and planned CLI polish are implemented. See [the release notes](CHANGELOG.md) for the first-release scope and known limitations. Future additions are listed below.
 
 - [x] **Phase 1: Core scanner.** Scan files and folders, detect provider keys, private keys, and generic secrets using entropy; mask output, filter placeholders, and review false alarms.
 - [x] **Phase 2: Git integration.** `--staged` scanning and the `install-hook` command.
-- [ ] **Phase 3: Polish.** Done: JSON output, and GitHub Actions CI (tests on Python 3.9–3.14, Linux and macOS). Still planned: colored output.
+- [x] **Phase 3: Polish.** Masked JSON output, automatic terminal colors, and GitHub Actions CI (Python 3.9–3.14 on Linux plus selected macOS versions).
 
 ---
 
@@ -315,9 +315,9 @@ This prints the results as [JSON](https://www.json.org/), a structured format th
 
 The normal output contains the JSON document and nothing else; notices go to stderr. The exit codes are the same as without `--json`. On an error (exit code `2`, for example a broken ignore file), nothing is printed on the normal output, only the error message on stderr. `--json` can't be combined with `--review`.
 
-### Colors *(planned)*
+### Colors
 
-When you run secretscan in a terminal, output is colored to make findings easy to spot. When the output goes somewhere else (a file, another program, a CI log), it automatically switches to plain text so no strange color codes end up in your files.
+In a terminal, findings and positive summaries are red, recognized placeholders and qualified summaries are yellow, and clean summaries are green. Redirected output and JSON stay plain. Set `NO_COLOR=1` to disable colors; `TERM=dumb` also disables them. Colors do not change masking, exit codes, or alignment.
 
 ### Exit codes
 
@@ -555,16 +555,22 @@ counts as a whole name part, so `bypass`, `compass`, and `passport` don't match.
 `.properties`, and Dockerfiles, lines like `PASSWORD=value`,
 `export DB_PASSWORD=value`, `password: value`, `- POSTGRES_PASSWORD=value`, and
 `ENV DB_PASSWORD=value` are checked too. A trailing ` # comment` is not part of
-the value. YAML's empty words (`null`, `~`, `true`, ...), YAML tags like `!vault`,
-and values starting with `$` (variables, `$(command)`) are skipped. Code files
-don't get this rule, because there `password: str` is a type hint.
+the value. Unquoted `null`, `~`, `true`, and `false` are skipped only in YAML
+mapping values (`password: null`), where they are non-string scalars. In `.env`,
+`.properties`, shell, and other string-valued config files, those words are
+literal passwords and are reported. Quoting a YAML scalar also makes it a
+literal string. `none` and `nil` are not YAML null scalars and are reported.
+YAML tags like `!vault` and values starting with `$` (variables, `$(command)`)
+remain excluded. Code files don't get the unquoted rule, because there
+`password: str` is a type hint.
 
 **Passwords in URLs** like `mysql://admin:<password>@db.example.com/app` are
 reported as **Password in URL** (or **Possible Weak Password in URL** for a
 simple one). Only the password part is masked and fingerprinted. Links with no
 password (`ssh://git@github.com`) or only a port don't match. When the
 password is a provider token (a GitHub token in a git URL), only the token
-finding is reported.
+finding is reported. A URL assigned to a password variable produces the URL
+password finding once, rather than an additional generic assignment warning.
 
 Type annotations between the name and operator, triple-quoted strings,
 interpolated strings, and arbitrary expressions are not supported. This is pattern matching, not a
@@ -608,9 +614,11 @@ this placeholder list.** Use review or an explicit inline marker for examples.
 
 Complete references such as `${DATABASE_PASSWORD}`, `$DATABASE_PASSWORD`,
 GitHub Actions' `${{ secrets.DATABASE_PASSWORD }}`, `$(cat password.txt)`,
-`{{ secrets.DATABASE_PASSWORD }}`, and `%DATABASE_PASSWORD%` are excluded, as
-are documentation placeholders written entirely in angle brackets
-(`<your-password>`). A value that only *contains* such text is still checked.
+`{{ secrets.DATABASE_PASSWORD }}`, and `%DATABASE_PASSWORD%` are excluded.
+Angle-bracket values such as `<your-password>` are **not** references and are
+reported in password assignments and URL credentials; dismiss confirmed
+examples explicitly through review. A value that only *contains* a reference
+is still checked.
 Assignments to calls such as `os.getenv(...)` are not quoted literals and do
 not match. Provider-specific rules never depend on the entropy threshold;
 when they overlap a generic candidate, only the provider finding is reported.
@@ -730,7 +738,7 @@ pip install -e ".[dev]"   # -e = "editable": code changes take effect without re
 pytest                    # [dev] = also install the development tools (pytest)
 ```
 
-Every push to GitHub also runs the full test suite automatically, on every supported Python version (3.9–3.14) on Linux, plus 3.9 and 3.14 on macOS ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)). The badge at the top of this README shows whether the latest run passed. Each run also scans the whole repository with secretscan itself.
+Every push to GitHub also runs the full test suite automatically, on every supported Python version (3.9–3.14) on Linux, plus 3.9 and 3.14 on macOS ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)). The badge at the top of this README shows whether the latest run passed. Each run also scans an exact snapshot of the committed repository with secretscan itself, excluding generated installation metadata while retaining every tracked file.
 
 > **Note on fake secrets in tests:** GitHub automatically blocks pushes that contain real-looking secrets. To avoid this, tests never contain a complete fake key as plain text. They build it in code instead, for example `"AKIA" + "X" * 16`, so the full string never appears in any file.
 
@@ -739,3 +747,18 @@ Every push to GitHub also runs the full test suite automatically, on every suppo
 ## License
 
 [MIT](LICENSE) © 2026 Ethan Ko
+
+## Release checks (maintainers)
+
+The release packaging CI job builds both archives and checks each in a separate
+virtual environment on Python 3.9 and 3.14. It verifies masking, JSON output,
+staged-file contents, hook replacement rules, a blocked commit, and a corrected
+commit. To repeat the check locally with an installed release:
+
+```bash
+python scripts/smoke_test.py
+```
+
+Use the Python interpreter from the environment where the package was installed.
+The check creates and removes a temporary Git repository and leaves your project
+and its hooks untouched. Release notes are in [CHANGELOG.md](CHANGELOG.md).

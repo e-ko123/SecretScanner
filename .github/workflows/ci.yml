@@ -68,5 +68,40 @@ jobs:
       # "Dogfooding": use the tool on its whole repository. Known test
       # examples are dismissed in the committed .secretscanignore, so anything
       # new (exit code 1) or any error (exit code 2) fails the run.
-      - name: Scan this repository with secretscan
-        run: secretscan .
+      - name: Scan the committed repository with secretscan
+        # pip can leave generated build/ and egg-info/ files in this checkout.
+        # Scan an exact committed snapshot so metadata copies of documented
+        # examples do not masquerade as new source files. Tracked build files
+        # are still included and scanned.
+        run: |
+          mkdir "$RUNNER_TEMP/secretscan-scan"
+          git archive --format=tar HEAD | tar -x -C "$RUNNER_TEMP/secretscan-scan"
+          secretscan "$RUNNER_TEMP/secretscan-scan"
+
+  package:
+    # Test release archives, not just an installation from the working tree.
+    name: Release archives on Python ${{ matrix.python-version }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.9", "3.14"]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Build wheel and source archive
+        run: |
+          python -m pip install --upgrade pip build
+          python -m build
+      - name: Check wheel installation in a fresh environment
+        run: |
+          python -m venv /tmp/secretscan-wheel
+          /tmp/secretscan-wheel/bin/python -m pip install dist/*.whl
+          /tmp/secretscan-wheel/bin/python scripts/smoke_test.py
+      - name: Check source archive installation in a fresh environment
+        run: |
+          python -m venv /tmp/secretscan-source
+          /tmp/secretscan-source/bin/python -m pip install dist/*.tar.gz
+          /tmp/secretscan-source/bin/python scripts/smoke_test.py

@@ -1,0 +1,7 @@
+# Keep the README's demonstration available in source release archives.
+include demo/demo.gif
+include demo/demo.tape
+include demo/setup.sh
+include CHANGELOG.md
+include scripts/smoke_test.py
+include .secretscanignore
